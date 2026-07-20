@@ -14,60 +14,143 @@
   ::-webkit-scrollbar-track{background:transparent}
   button{font-family:'Space Grotesk',system-ui,sans-serif}
   @keyframes dropIn{from{opacity:0;transform:translateY(-6px) scale(.97)}to{opacity:1;transform:translateY(0) scale(1)}}
-  /* hover states ported from the design's `style-hover` directives */
+  @keyframes spin{to{transform:rotate(360deg)}}
   .hw:hover{color:#fff !important}
   .hs:hover{transform:scale(1.07) !important}
   .hb5:hover{background:rgba(255,255,255,.05) !important}
   .hb6:hover{background:rgba(255,255,255,.06) !important}
+  .spgreen:hover{background:#1ed760 !important;transform:translateY(-1px)}
 </style>
 <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://sdk.scdn.co/spotify-player.js"></script>
 <script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"></script>
 </head>
 <body>
 <div id="root"></div>
 
 <script type="text/babel" data-presets="react">
-// ---------------------------------------------------------------------------
-// css(): turn an inline CSS text string into a React style object.
-// Lets us keep the original design's style strings verbatim (dynamic values
-// interpolated via template literals), so the port stays faithful.
-// ---------------------------------------------------------------------------
-function css(text){
-  const o={};
-  String(text).split(';').forEach(decl=>{
-    const i=decl.indexOf(':');
-    if(i<0) return;
-    const k=decl.slice(0,i).trim();
-    const val=decl.slice(i+1).trim();
-    if(!k) return;
-    const key=k.replace(/-([a-z])/g,(_,c)=>c.toUpperCase());
-    o[key]=val;
-  });
-  return o;
-}
+// ===========================================================================
+// CONFIG — paste your Spotify app's Client ID here.
+// Create an app at https://developer.spotify.com/dashboard (free), then add
+// the redirect URI shown on the connect screen to the app's settings.
+// The Client ID is not a secret; this app uses the Authorization Code + PKCE
+// flow, so no client secret is ever needed or stored.
+// ===========================================================================
+const CONFIG = {
+  clientId: '1b99b368fe8c474dbc03173ccf2178c7',
+  scopes: [
+    'streaming',                      // Web Playback SDK
+    'user-read-email','user-read-private',   // required by the SDK
+    'user-read-playback-state','user-modify-playback-state','user-read-currently-playing',
+    'user-read-recently-played',
+    'playlist-read-private','playlist-read-collaborative',
+    'user-top-read',
+    'user-library-read','user-library-modify'
+  ]
+};
+// Redirect back to exactly this page (query stripped). Register this EXACT
+// value in the Spotify dashboard.
+const REDIRECT_URI = location.origin + location.pathname;
+const TOKEN_KEY = 'wax-spotify-tokens';
+const VERIFIER_KEY = 'wax-pkce-verifier';
+const CONFIGURED = CONFIG.clientId && CONFIG.clientId !== 'PASTE_YOUR_CLIENT_ID_HERE';
 
-class Component extends React.Component {
+// --- PKCE auth --------------------------------------------------------------
+function randStr(n){const a=new Uint8Array(n);crypto.getRandomValues(a);
+  return Array.from(a,b=>('0'+(b&0xff).toString(16)).slice(-2)).join('');}
+function b64url(bytes){let s=btoa(String.fromCharCode.apply(null,bytes));
+  return s.replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
+async function challengeFor(verifier){
+  const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(verifier));
+  return b64url(new Uint8Array(digest));}
+async function beginAuth(){
+  const verifier=randStr(48);
+  localStorage.setItem(VERIFIER_KEY,verifier);
+  const state=randStr(8); sessionStorage.setItem('wax-auth-state',state);
+  const p=new URLSearchParams({client_id:CONFIG.clientId,response_type:'code',
+    redirect_uri:REDIRECT_URI,code_challenge_method:'S256',
+    code_challenge:await challengeFor(verifier),state,scope:CONFIG.scopes.join(' ')});
+  location.href='https://accounts.spotify.com/authorize?'+p.toString();
+}
+function getTokens(){try{return JSON.parse(localStorage.getItem(TOKEN_KEY));}catch(e){return null;}}
+function storeTokens(j){
+  const prev=getTokens();
+  const rec={access_token:j.access_token,
+    refresh_token:j.refresh_token||(prev&&prev.refresh_token),
+    expires_at:Date.now()+(j.expires_in*1000)};
+  localStorage.setItem(TOKEN_KEY,JSON.stringify(rec));
+  return rec;
+}
+async function exchangeCode(code){
+  const verifier=localStorage.getItem(VERIFIER_KEY);
+  const body=new URLSearchParams({grant_type:'authorization_code',code,
+    redirect_uri:REDIRECT_URI,client_id:CONFIG.clientId,code_verifier:verifier});
+  const r=await fetch('https://accounts.spotify.com/api/token',{method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'},body});
+  if(!r.ok) throw new Error('Token exchange failed ('+r.status+')');
+  return storeTokens(await r.json());
+}
+async function refreshTokens(){
+  const t=getTokens(); if(!t||!t.refresh_token) throw new Error('No refresh token');
+  const body=new URLSearchParams({grant_type:'refresh_token',
+    refresh_token:t.refresh_token,client_id:CONFIG.clientId});
+  const r=await fetch('https://accounts.spotify.com/api/token',{method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'},body});
+  if(!r.ok){localStorage.removeItem(TOKEN_KEY);throw new Error('Session expired ('+r.status+')');}
+  return storeTokens(await r.json());
+}
+async function validToken(){
+  let t=getTokens(); if(!t) return null;
+  if(Date.now()>t.expires_at-60000){t=await refreshTokens();}
+  return t.access_token;
+}
+function logout(){localStorage.removeItem(TOKEN_KEY);location.href=REDIRECT_URI;}
+
+// --- Web API helper ---------------------------------------------------------
+async function api(path,opts={}){
+  const token=await validToken();
+  if(!token) throw Object.assign(new Error('Not authenticated'),{status:401});
+  const r=await fetch('https://api.spotify.com/v1'+path,{
+    method:opts.method||'GET',
+    headers:Object.assign({Authorization:'Bearer '+token},opts.body?{'Content-Type':'application/json'}:{}),
+    body:opts.body?JSON.stringify(opts.body):undefined});
+  if(r.status===401&&!opts._retry){try{await refreshTokens();}catch(e){}return api(path,Object.assign({},opts,{_retry:true}));}
+  if(r.status===204||r.status===202) return null;
+  if(!r.ok) throw Object.assign(new Error('Spotify API '+r.status),{status:r.status});
+  const ct=r.headers.get('content-type')||'';
+  return ct.indexOf('json')>=0?r.json():null;
+}
+function whenSdkReady(){return new Promise(res=>{
+  if(window.Spotify) return res();
+  window.onSpotifyWebPlaybackSDKReady=()=>res();});}
+
+// --- helpers ----------------------------------------------------------------
+function css(text){const o={};String(text).split(';').forEach(decl=>{
+  const i=decl.indexOf(':'); if(i<0)return;
+  const k=decl.slice(0,i).trim(), val=decl.slice(i+1).trim(); if(!k)return;
+  o[k.replace(/-([a-z])/g,(_,c)=>c.toUpperCase())]=val;});return o;}
+function artCss(url){return url?
+  "background-color:#26272b;background-image:url('"+url+"');background-size:cover;background-position:center":
+  "background:#26272b";}
+function mapTrack(t){if(!t)return null;
+  const imgs=(t.album&&t.album.images)||t.images||[];
+  return {id:t.id,uri:t.uri,title:t.name||'',
+    artist:(t.artists||[]).map(a=>a.name).join(', '),
+    album:t.album?t.album.name:'',
+    artUrl:imgs.length?imgs[imgs.length>2?1:0].url:'',
+    dur:Math.round((t.duration_ms||0)/1000)};}
+// tiny hsl round-trip so the "adapt" theme can pull a vivid accent from art
+function rgb2hsl(r,g,b){r/=255;g/=255;b/=255;const mx=Math.max(r,g,b),mn=Math.min(r,g,b);
+  let h,s,l=(mx+mn)/2;if(mx===mn){h=s=0;}else{const d=mx-mn;s=l>.5?d/(2-mx-mn):d/(mx+mn);
+  h=mx===r?(g-b)/d+(g<b?6:0):mx===g?(b-r)/d+2:(r-g)/d+4;h/=6;}return [h,s,l];}
+function hsl2hex(h,s,l){const f=n=>{const k=(n+h*12)%12;const a=s*Math.min(l,1-l);
+  const c=l-a*Math.max(-1,Math.min(k-3,9-k,1));return ('0'+Math.round(c*255).toString(16)).slice(-2);};
+  return '#'+f(0)+f(8)+f(4);}
+
+class Dashboard extends React.Component {
   constructor(props){
     super(props);
-    const G=(a,b,c)=>'linear-gradient(135deg,'+a+','+b+' 55%,'+c+')';
-    this.songs=[
-      {title:'Neon Reverie',artist:'Cascade Theory',album:'Circuit Nights',dur:214,accent:'#4fd8c0',art:G('#0e7a6f','#4fd8c0','#0b2e2a'),
-       lyrics:[[8,'City hums in half-light'],[22,'Windows blink like satellites'],[36,'I trace the wires home'],[50,'Every street a circuit board'],[64,'And the night runs on neon reverie'],[80,'Carry me down the avenue'],[96,'Static in my pocket, signal in my chest'],[112,'We glow because we have to'],[128,'Turn the dial past midnight'],[146,'Let the chorus flood the room'],[164,'And the night runs on neon reverie'],[182,'Carry me, carry me home'],[198,'Till the morning finds the frequency']]},
-      {title:'Paper Planets',artist:'Iris Vale',album:'Courtyards',dur:197,accent:'#f0956b',art:G('#b34a28','#f0a06b','#3a1c12'),
-       lyrics:[[7,'Fold the morning into wings'],[20,'Send it sailing off the fire escape'],[33,'Paper planets in orbit'],[47,'Round the kitchen light'],[60,'We were small and certain'],[75,'Gravity was just a rumor then'],[90,'Throw your voice across the courtyard'],[105,'I still catch it now and then'],[120,'Every crease a coastline'],[138,'Every fold a year'],[155,'Paper planets falling'],[172,'Soft as paper planets do'],[186,'Landing somewhere close to you']]},
-      {title:'Low Tide',artist:'Marlowe',album:'Seawall',dur:233,accent:'#7d9bef',art:G('#27408f','#6f8fe8','#0b1230'),
-       lyrics:[[9,'The harbor holds its breath'],[24,'Boats asleep in rows'],[40,'Salt on every railing'],[56,'Low tide, letting go'],[72,'I left my shoes on the seawall'],[90,'Walked out where the water was'],[108,'Everything the ocean borrows'],[126,'It returns with interest'],[144,'Slow now, slow now'],[162,'The moon does all the work'],[180,'Low tide, low tide'],[200,'Even the lighthouse rests its eye'],[218,'And so can I']]},
-      {title:'Glasshouse',artist:'The Foxgloves',album:'Herbarium',dur:186,accent:'#9ed36a',art:G('#2f7a3d','#a8d979','#12260f'),
-       lyrics:[[8,'Grew a garden out of rumors'],[21,'Vines along the hall'],[34,'Glasshouse, careful now'],[48,'Every wall remembers'],[62,'Sunlight files a report'],[78,'On everything we said'],[94,'Throw no stones, keep your voice in bloom'],[110,'We live see-through, we live in bloom'],[126,'Fog your breath against the pane'],[142,'Write a name, erase a name'],[158,'Glasshouse, hold the weather out'],[172,'Hold the winter out of us']]},
-      {title:'Static Bloom',artist:'Nova Court',album:'Antenna Garden',dur:205,accent:'#d97fd0',art:G('#7a2f8f','#d979c9','#260f24'),
-       lyrics:[[8,'Petals made of interference'],[22,'Opening on channel three'],[36,'A static bloom in the antenna light'],[52,'Growing through the frequency'],[68,'Tune me somewhere warmer'],[84,'Past the weather and the news'],[100,'Every flower is a broadcast'],[116,'Every color is a clue'],[132,'Bloom, static, bloom'],[150,'In the snow of the screen'],[168,'Bloom, static, bloom'],[186,'The signal loves the noise']]},
-      {title:'Meridian',artist:'Sable & June',album:'Twelve O’Clock Light',dur:178,accent:'#f2c95c',art:G('#b98a2c','#f2d06b','#2a1f08'),
-       lyrics:[[7,'Noon leans on the windowsill'],[19,'Dust becomes a golden crowd'],[32,'Meridian, hold still'],[46,'The day is halfway out loud'],[60,'Shadows pack their suitcases'],[76,'Light forgets to leave'],[92,'Meet me at the meridian'],[108,'Where the afternoon believes'],[124,'We could live here, sun-fixed'],[142,'Hands at twelve o’clock'],[158,'Till the evening picks the lock']]}
-    ];
-    this.deviceList=[{name:'Desk — Laptop',type:'THIS DEVICE'},{name:'Living Room Speaker',type:'WIRELESS'},{name:'Bedroom Mini',type:'WIRELESS'}];
-    this.plDefs=[{name:'Late Night Circuit',tracks:[0,4,2]},{name:'Golden Hour',tracks:[5,1,3]},{name:'Seawall Sessions',tracks:[2,3,1]},{name:'Full Rotation',tracks:[0,1,2,3,4,5]}];
-    // widget spec: base span [cols,rows], alt = resized span (resizable widgets only)
     this.WDEF=[
       {id:'now',name:'Now Playing',span:[2,2]},
       {id:'viz',name:'Visualizer',span:[2,2],alt:[2,1]},
@@ -81,40 +164,159 @@ class Component extends React.Component {
       {id:'clock',name:'Clock',span:[1,1]},
       {id:'hist',name:'Recently Played',span:[2,1],alt:[4,1]}
     ];
+    this.themes=[{name:'Adapt to art',key:'adapt'},{name:'Teal',key:'#4fd8c0'},{name:'Ember',key:'#f0956b'},{name:'Cobalt',key:'#7d9bef'},{name:'Lime',key:'#9ed36a'},{name:'Orchid',key:'#d97fd0'},{name:'Gold',key:'#f2c95c'}];
     this.vizRef=React.createRef(); this.lyrRef=React.createRef();
-    let saved={}; try{saved=JSON.parse(localStorage.getItem('pulse-dash')||'{}')}catch(e){}
-    const w={}; this.WDEF.forEach((d,i)=>{const sv=saved.w&&saved.w[d.id];w[d.id]={o:sv&&typeof sv.o==='number'?sv.o:i,on:sv?!!sv.on:true,big:sv?!!sv.big:false};});
-    this.themes=[{name:'Adapt to music',key:'adapt'},{name:'Teal',key:'#4fd8c0'},{name:'Ember',key:'#f0956b'},{name:'Cobalt',key:'#7d9bef'},{name:'Lime',key:'#9ed36a'},{name:'Orchid',key:'#d97fd0'},{name:'Gold',key:'#f2c95c'}];
-    this.state={idx:0,t:26,playing:true,vol:.72,eq:[.5,.62,.55,.42,.5],device:0,viz:saved.viz||null,
-      w:w,fs:null,menuOpen:false,themeOpen:false,activePl:-1,
+    let saved={}; try{saved=JSON.parse(localStorage.getItem('wax-dash')||'{}')}catch(e){}
+    const w={}; this.WDEF.forEach((d,i)=>{const sv=saved.w&&saved.w[d.id];
+      w[d.id]={o:sv&&typeof sv.o==='number'?sv.o:i,on:sv?!!sv.on:true,big:sv?!!sv.big:false};});
+    this.state={
+      // playback (from the Web Playback SDK)
+      track:null,playing:false,posMs:0,durMs:0,shuffle:false,repeat:0,liked:false,vol:.5,
+      artColor:null,
+      // remote data (Web API)
+      devices:[],queue:[],playlists:[],recent:[],topTracks:[],topArtist:'',
+      // ui
+      w,fs:null,menuOpen:false,themeOpen:false,activePl:null,
+      viz:saved.viz||null,eq:[.5,.62,.55,.42,.5],
       theme:saved.theme||'adapt',barOpen:saved.barOpen===undefined?true:!!saved.barOpen,
-      queue:[1,2,3],history:[4,3],liked:false,shuffle:false,repeat:false,clock:new Date(),listen:0,played:12};
+      // status + session
+      status:'Connecting…',error:null,clock:new Date(),listen:0,played:0
+    };
+    this.deviceId=null; this._lastTrackId=null;
   }
-  song(){return this.songs[this.state.idx];}
+  // --- utilities ------------------------------------------------------------
   hexA(h,a){const n=parseInt(h.slice(1),16);return 'rgba('+(n>>16&255)+','+(n>>8&255)+','+(n&255)+','+a+')';}
   fmt(s){s=Math.max(0,Math.floor(s));return Math.floor(s/60)+':'+String(s%60).padStart(2,'0');}
-  save(){try{localStorage.setItem('pulse-dash',JSON.stringify({w:this.state.w,viz:this.state.viz,theme:this.state.theme,barOpen:this.state.barOpen}));}catch(e){}}
-  accent(){return this.state.theme==='adapt'?this.song().accent:this.state.theme;}
-  vizMode(){return this.state.viz||this.props.defaultVisualizer||'bars';}
-  refill(q,ni){q=q.slice();let g=0;while(q.length<3&&g++<50){const c=Math.floor(Math.random()*this.songs.length);if(c!==ni&&!q.includes(c))q.push(c);}return q;}
-  advance(s){const hist=[s.idx,...s.history].slice(0,10);let q=s.queue.slice();const ni=q.length?q.shift():(s.idx+1)%this.songs.length;return {idx:ni,queue:this.refill(q,ni),history:hist,t:0,played:s.played+1,liked:false};}
-  actLine(){const L=this.song().lyrics;if(this.state.t<L[0][0])return -1;let a=0;for(let i=0;i<L.length;i++)if(this.state.t>=L[i][0])a=i;return a;}
+  save(){try{localStorage.setItem('wax-dash',JSON.stringify({w:this.state.w,viz:this.state.viz,theme:this.state.theme,barOpen:this.state.barOpen}));}catch(e){}}
+  accent(){return this.state.theme==='adapt'?(this.state.artColor||'#4fd8c0'):this.state.theme;}
+  vizMode(){return this.state.viz||'bars';}
+  greyIf(on){return on?this.accent():'rgba(255,255,255,.42)';}
+
+  // --- Spotify SDK wiring ---------------------------------------------------
   componentDidMount(){
-    this._tick=setInterval(()=>{if(!this.state.playing)return;
-      this.setState(s=>{const d=this.songs[s.idx].dur,t=s.t+.5,L={listen:s.listen+.5};
-        if(t<d)return Object.assign({t:t},L);
-        if(s.repeat)return Object.assign({t:0},L);
-        return Object.assign(this.advance(s),L);});},500);
+    whenSdkReady().then(()=>this.initPlayer()).catch(e=>this.setState({error:String(e.message||e)}));
     this._clk=setInterval(()=>this.setState({clock:new Date()}),1000);
-    this._esc=(e)=>{if(e.key==='Escape')this.setState({fs:null,menuOpen:false});};
+    this._tick=setInterval(()=>{if(!this.state.playing)return;
+      this.setState(s=>({posMs:Math.min(s.durMs||s.posMs,s.posMs+500),listen:s.listen+.5}));},500);
+    this._sync=setInterval(()=>{if(this.player)this.player.getCurrentState().then(st=>{if(st)this.applyState(st);});},4000);
+    this._poll=setInterval(()=>{this.refreshDevices();this.refreshQueue();},8000);
+    this._reci=setInterval(()=>this.refreshRecent(),30000);
+    this._esc=(e)=>{if(e.key==='Escape')this.setState({fs:null,menuOpen:false,themeOpen:false});};
     window.addEventListener('keydown',this._esc);
     const loop=(ts)=>{this._raf=requestAnimationFrame(loop);this.drawViz(ts/1000);};
     this._raf=requestAnimationFrame(loop);
   }
-  componentWillUnmount(){clearInterval(this._tick);clearInterval(this._clk);cancelAnimationFrame(this._raf);window.removeEventListener('keydown',this._esc);}
+  componentWillUnmount(){[this._clk,this._tick,this._sync,this._poll,this._reci].forEach(clearInterval);
+    cancelAnimationFrame(this._raf);window.removeEventListener('keydown',this._esc);
+    if(this.player)this.player.disconnect();}
   componentDidUpdate(){const a=this.actLine();
     if(a!==this._lastA){this._lastA=a;const el=this.lyrRef.current;
       if(el&&a>=0&&el.children[a])el.scrollTop=el.children[a].offsetTop-el.clientHeight/2+14;}}
+
+  initPlayer(){
+    const player=new Spotify.Player({name:'Wax',volume:this.state.vol,
+      getOAuthToken:cb=>{validToken().then(t=>cb(t)).catch(()=>{});}});
+    this.player=player;
+    player.addListener('ready',({device_id})=>{
+      this.deviceId=device_id;
+      this.setState({status:null});
+      this.transfer(device_id,false);
+      player.getVolume().then(v=>this.setState({vol:v})).catch(()=>{});
+      this.refreshAll();
+    });
+    player.addListener('not_ready',()=>this.setState({status:'Device offline'}));
+    player.addListener('player_state_changed',st=>{if(st)this.applyState(st);});
+    ['initialization_error','authentication_error','account_error','playback_error'].forEach(ev=>
+      player.addListener(ev,({message})=>this.setState({error:message||ev.replace(/_/g,' ')})));
+    player.connect().then(ok=>{if(!ok)this.setState({error:'Could not connect the player. A Premium account is required.'});});
+  }
+  applyState(st){
+    const t=mapTrack(st.track_window.current_track);
+    if(!t)return;
+    const prev=this._lastTrackId;
+    this.setState(s=>({track:t,playing:!st.paused,posMs:st.position,durMs:st.duration,
+      shuffle:!!st.shuffle,repeat:st.repeat_mode|0,
+      played:(prev&&prev!==t.id)?s.played+1:s.played}));
+    if(prev!==t.id){this._lastTrackId=t.id;this.refreshLiked(t.id);this.refreshQueue();
+      this.extractColor(t.artUrl);}
+  }
+  extractColor(url){
+    if(this.state.theme!=='adapt'){return;}
+    if(!url){this.setState({artColor:null});return;}
+    const img=new Image(); img.crossOrigin='anonymous';
+    img.onload=()=>{try{
+      const c=document.createElement('canvas');c.width=c.height=16;
+      const x=c.getContext('2d');x.drawImage(img,0,0,16,16);
+      const d=x.getImageData(0,0,16,16).data;let r=0,g=0,b=0,n=0;
+      for(let i=0;i<d.length;i+=4){const rr=d[i],gg=d[i+1],bb=d[i+2];
+        if(Math.max(rr,gg,bb)-Math.min(rr,gg,bb)<20)continue;r+=rr;g+=gg;b+=bb;n++;}
+      if(!n){for(let i=0;i<d.length;i+=4){r+=d[i];g+=d[i+1];b+=d[i+2];n++;}}
+      r/=n;g/=n;b/=n;
+      const hsl=rgb2hsl(r,g,b);
+      this.setState({artColor:hsl2hex(hsl[0],Math.max(.55,Math.min(.95,hsl[1])),Math.max(.52,Math.min(.66,hsl[2])))});
+    }catch(e){this.setState({artColor:null});}};
+    img.onerror=()=>this.setState({artColor:null});
+    img.src=url;
+  }
+
+  // --- data refresh ---------------------------------------------------------
+  refreshAll(){this.refreshDevices();this.refreshQueue();this.refreshPlaylists();this.refreshRecent();this.refreshTop();}
+  async refreshDevices(){try{const d=await api('/me/player/devices');if(d&&d.devices)this.setState({devices:d.devices});}catch(e){}}
+  async refreshQueue(){try{const q=await api('/me/player/queue');if(q&&q.queue)this.setState({queue:q.queue.slice(0,8).map(mapTrack)});}catch(e){}}
+  async refreshRecent(){try{const r=await api('/me/player/recently-played?limit=10');if(r&&r.items)this.setState({recent:r.items.map(it=>mapTrack(it.track))});}catch(e){}}
+  async refreshPlaylists(){try{const p=await api('/me/playlists?limit=20');if(p&&p.items)
+    this.setState({playlists:p.items.filter(Boolean).map(pl=>({id:pl.id,uri:pl.uri,name:pl.name,
+      count:pl.tracks?pl.tracks.total:0,owner:pl.owner?pl.owner.display_name:'',
+      artUrl:pl.images&&pl.images[0]?pl.images[0].url:''}))});}catch(e){}}
+  async refreshTop(){
+    try{const t=await api('/me/top/tracks?limit=8&time_range=short_term');if(t&&t.items)this.setState({topTracks:t.items.map(mapTrack)});}catch(e){}
+    try{const a=await api('/me/top/artists?limit=1&time_range=short_term');if(a&&a.items&&a.items[0])this.setState({topArtist:a.items[0].name});}catch(e){}}
+  async refreshLiked(id){if(!id){this.setState({liked:false});return;}
+    try{const r=await api('/me/tracks/contains?ids='+id);this.setState({liked:Array.isArray(r)&&!!r[0]});}catch(e){}}
+
+  // --- playback controls ----------------------------------------------------
+  toggle=()=>{if(this.player)this.player.togglePlay();};
+  next=()=>{if(this.player)this.player.nextTrack();};
+  prev=()=>{if(this.player)this.player.previousTrack();};
+  seekDown=(e)=>this.barDrag(e,fx=>{const ms=fx*this.state.durMs;this.setState({posMs:ms});if(this.player)this.player.seek(ms);});
+  volDown=(e)=>this.barDrag(e,fx=>{this.setState({vol:fx});if(this.player)this.player.setVolume(fx);});
+  shuffleT=async()=>{const ns=!this.state.shuffle;this.setState({shuffle:ns});
+    try{await api('/me/player/shuffle?state='+ns,{method:'PUT'});}catch(e){this.setState({shuffle:!ns});}};
+  repeatT=async()=>{const modes=['off','context','track'];const nx=(this.state.repeat+1)%3;this.setState({repeat:nx});
+    try{await api('/me/player/repeat?state='+modes[nx],{method:'PUT'});}catch(e){}};
+  likeT=async()=>{const id=this.state.track&&this.state.track.id;if(!id)return;const nl=!this.state.liked;this.setState({liked:nl});
+    try{await api('/me/tracks?ids='+id,{method:nl?'PUT':'DELETE'});}catch(e){this.setState({liked:!nl});}};
+  play(body){const q=this.deviceId?('?device_id='+this.deviceId):'';
+    return api('/me/player/play'+q,{method:'PUT',body}).catch(e=>this.setState({error:'Playback failed ('+(e.status||e.message)+')'}));}
+  playContext(uri,pi){this.setState({activePl:pi==null?this.state.activePl:pi});this.play({context_uri:uri});}
+  playUris(uris){this.play({uris});}
+  addQueue(uri){const q=this.deviceId?('&device_id='+this.deviceId):'';
+    api('/me/player/queue?uri='+encodeURIComponent(uri)+q,{method:'POST'}).then(()=>setTimeout(()=>this.refreshQueue(),400)).catch(e=>this.setState({error:'Could not queue ('+(e.status||e.message)+')'}));}
+  transfer(id,play){api('/me/player',{method:'PUT',body:{device_ids:[id],play:!!play}}).then(()=>setTimeout(()=>this.refreshDevices(),400)).catch(()=>{});}
+
+  // --- widget chrome / layout ----------------------------------------------
+  setW(id,patch){this.setState(s=>{const w=Object.assign({},s.w);w[id]=Object.assign({},w[id],patch);return{w};},()=>this.save());}
+  fsClick=(e)=>{const id=e.currentTarget.dataset.wid;this.setState(s=>({fs:s.fs===id?null:id}));};
+  rmClick=(e)=>{const id=e.currentTarget.dataset.wid;this.setState(s=>({fs:s.fs===id?null:s.fs}));this.setW(id,{on:false});};
+  szClick=(e)=>{const id=e.currentTarget.dataset.wid;this.setW(id,{big:!this.state.w[id].big});};
+  menuT=()=>this.setState(s=>({menuOpen:!s.menuOpen,themeOpen:false}));
+  themeT=()=>this.setState(s=>({themeOpen:!s.themeOpen,menuOpen:false}));
+  barT=()=>this.setState(s=>({barOpen:!s.barOpen}),()=>this.save());
+  dragStart=(e)=>{this._drag=e.currentTarget.dataset.wid;e.dataTransfer.setData('text/plain',this._drag);e.dataTransfer.effectAllowed='move';};
+  dragOver=(e)=>{e.preventDefault();e.dataTransfer.dropEffect='move';e.currentTarget.style.outline='1.5px solid '+this.accent();e.currentTarget.style.outlineOffset='-1.5px';};
+  dragLeave=(e)=>{e.currentTarget.style.outline='';};
+  drop=(e)=>{e.preventDefault();e.currentTarget.style.outline='';const a=this._drag,b=e.currentTarget.dataset.wid;this._drag=null;
+    if(!a||!b||a===b)return;
+    this.setState(s=>{const w=Object.assign({},s.w);const wa=Object.assign({},w[a]),wb=Object.assign({},w[b]);
+      const tmp=wa.o;wa.o=wb.o;wb.o=tmp;w[a]=wa;w[b]=wb;return{w};},()=>this.save());};
+  lay(id){const s=this.state,d=this.WDEF.find(x=>x.id===id),st=s.w[id];
+    if(!st.on)return 'display:none';
+    if(s.fs===id)return 'position:fixed;top:18px;left:18px;right:18px;bottom:18px;z-index:60;background:#101114;box-shadow:0 30px 90px rgba(0,0,0,.65)';
+    const sp=st.big&&d.alt?d.alt:d.span;
+    return 'order:'+st.o+';grid-column:span '+sp[0]+';grid-row:span '+sp[1];}
+
+  // --- visualizer (procedural; reacts to real play/pause state) --------------
+  actLine(){return -1;} // no lyrics source; kept for scroll hook compatibility
   rr(x,a,b,w,h,r){r=Math.min(r,w/2,h/2);x.beginPath();x.moveTo(a+r,b);x.arcTo(a+w,b,a+w,b+h,r);x.arcTo(a+w,b+h,a,b+h,r);x.arcTo(a,b+h,a,b,r);x.arcTo(a,b,a+w,b,r);x.closePath();x.fill();}
   drawViz(t){const c=this.vizRef.current;if(!c)return;const w=c.clientWidth,h=c.clientHeight;if(!w||!h)return;
     const dpr=window.devicePixelRatio||1;
@@ -146,53 +348,18 @@ class Component extends React.Component {
     const go=(ev)=>{const r=el.getBoundingClientRect();cb(Math.min(1,Math.max(0,(ev.clientX-r.left)/r.width)),Math.min(1,Math.max(0,1-(ev.clientY-r.top)/r.height)));};
     go(e);const mv=(ev)=>go(ev);const up=()=>{window.removeEventListener('pointermove',mv);window.removeEventListener('pointerup',up);};
     window.addEventListener('pointermove',mv);window.addEventListener('pointerup',up);}
-  toggle=()=>this.setState(s=>({playing:!s.playing}));
-  next=()=>this.setState(s=>this.advance(s));
-  prev=()=>this.setState(s=>{if(s.t>5)return{t:0};const h=s.history.slice();const pi=h.length?h.shift():(s.idx+this.songs.length-1)%this.songs.length;return{idx:pi,history:h,t:0,liked:false};});
-  shuffleT=()=>this.setState(s=>({shuffle:!s.shuffle,queue:s.shuffle?s.queue:s.queue.slice().sort(()=>Math.random()-.5)}));
-  repeatT=()=>this.setState(s=>({repeat:!s.repeat}));
-  likeT=()=>this.setState(s=>({liked:!s.liked}));
-  seekDown=(e)=>this.barDrag(e,(fx)=>this.setState({t:fx*this.song().dur}));
-  volDown=(e)=>this.barDrag(e,(fx)=>this.setState({vol:fx}));
-  goQueue(pos){this.setState(s=>{const q=s.queue.slice(),ni=q.splice(pos,1)[0];
-    return{idx:ni,queue:this.refill(q,ni),history:[s.idx,...s.history].slice(0,10),t:0,played:s.played+1,liked:false};});}
-  playPl(pi){const tr=this.plDefs[pi].tracks;
-    this.setState(s=>({idx:tr[0],queue:tr.slice(1),history:[s.idx,...s.history].slice(0,10),t:0,playing:true,played:s.played+1,liked:false,activePl:pi}));}
-  setW(id,patch){this.setState(s=>{const w=Object.assign({},s.w);w[id]=Object.assign({},w[id],patch);return{w:w};},()=>this.save());}
-  fsClick=(e)=>{const id=e.currentTarget.dataset.wid;this.setState(s=>({fs:s.fs===id?null:id}));};
-  rmClick=(e)=>{const id=e.currentTarget.dataset.wid;this.setState(s=>({fs:s.fs===id?null:s.fs}));this.setW(id,{on:false});};
-  szClick=(e)=>{const id=e.currentTarget.dataset.wid;this.setW(id,{big:!this.state.w[id].big});};
-  menuT=()=>this.setState(s=>({menuOpen:!s.menuOpen,themeOpen:false}));
-  themeT=()=>this.setState(s=>({themeOpen:!s.themeOpen,menuOpen:false}));
-  barT=()=>this.setState(s=>({barOpen:!s.barOpen}),()=>this.save());
-  dragStart=(e)=>{this._drag=e.currentTarget.dataset.wid;e.dataTransfer.setData('text/plain',this._drag);e.dataTransfer.effectAllowed='move';};
-  dragOver=(e)=>{e.preventDefault();e.dataTransfer.dropEffect='move';e.currentTarget.style.outline='1.5px solid '+this.accent();e.currentTarget.style.outlineOffset='-1.5px';};
-  dragLeave=(e)=>{e.currentTarget.style.outline='';};
-  drop=(e)=>{e.preventDefault();e.currentTarget.style.outline='';const a=this._drag,b=e.currentTarget.dataset.wid;this._drag=null;
-    if(!a||!b||a===b)return;
-    this.setState(s=>{const w=Object.assign({},s.w);const wa=Object.assign({},w[a]),wb=Object.assign({},w[b]);
-      const tmp=wa.o;wa.o=wb.o;wb.o=tmp;w[a]=wa;w[b]=wb;return{w:w};},()=>this.save());};
-  lay(id){const s=this.state,d=this.WDEF.find(x=>x.id===id),st=s.w[id];
-    if(!st.on)return 'display:none';
-    if(s.fs===id)return 'position:fixed;top:18px;left:18px;right:18px;bottom:18px;z-index:60;background:#101114;box-shadow:0 30px 90px rgba(0,0,0,.65)';
-    const sp=st.big&&d.alt?d.alt:d.span;
-    return 'order:'+st.o+';grid-column:span '+sp[0]+';grid-row:span '+sp[1];}
+
+  // --- view model -----------------------------------------------------------
   renderVals(){
-    const s=this.state,sg=this.song(),ac=this.accent(),glow=this.props.glow??.7,act=this.actLine();
-    const mode=this.vizMode();
-    const cnt={};[s.idx,...s.history].forEach(i=>cnt[i]=(cnt[i]||0)+1);
-    let top=s.idx;Object.keys(cnt).forEach(k=>{if(cnt[k]>cnt[top])top=+k;});
-    const pool=this.songs.map((_,i)=>i).filter(i=>i!==s.idx&&!s.queue.includes(i)).slice(0,2);
-    const d=s.clock,hr=d.getHours();
-    const pad=(n)=>String(n).padStart(2,'0');
-    const secs=(this.props.showSeconds??false)?':'+pad(d.getSeconds()):'';
+    const s=this.state,tk=s.track,ac=this.accent(),glow=.7;
+    const d=s.clock,hr=d.getHours(),pad=(n)=>String(n).padStart(2,'0');
     return {
       bg:'radial-gradient(1100px 720px at 16% -6%, '+this.hexA(ac,.22*glow)+', rgba(0,0,0,0) 62%), radial-gradient(900px 640px at 88% 108%, '+this.hexA(ac,.16*glow)+', rgba(0,0,0,0) 60%), #0b0c0e',
-      accent:ac,artBg:sg.art,title:sg.title,artist:sg.artist,album:sg.album,
+      accent:ac,artUrl:tk?tk.artUrl:'',title:tk?tk.title:'Nothing playing',
+      artist:tk?tk.artist:'—',album:tk?tk.album:(this.deviceId?'Press play or pick a playlist':'Connecting…'),
       playing:s.playing,paused:!s.playing,
-      cur:this.fmt(s.t),durS:this.fmt(sg.dur),prog:Math.min(100,s.t/sg.dur*100)+'%',
-      shFg:s.shuffle?ac:'rgba(255,255,255,.42)',rpFg:s.repeat?ac:'rgba(255,255,255,.42)',
-      lkFg:s.liked?ac:'rgba(255,255,255,.42)',lkLabel:s.liked?'LIKED':'LIKE',
+      cur:this.fmt(s.posMs/1000),durS:this.fmt((s.durMs||0)/1000),prog:(s.durMs?Math.min(100,s.posMs/s.durMs*100):0)+'%',
+      shFg:this.greyIf(s.shuffle),rpFg:this.greyIf(s.repeat!==0),lkFg:this.greyIf(s.liked),lkLabel:s.liked?'LIKED':'LIKE',
       toggle:this.toggle,next:this.next,prev:this.prev,shuffleT:this.shuffleT,repeatT:this.repeatT,likeT:this.likeT,
       seekDown:this.seekDown,volDown:this.volDown,volPct:Math.round(s.vol*100)+'%',
       dragStart:this.dragStart,dragOver:this.dragOver,dragLeave:this.dragLeave,drop:this.drop,
@@ -204,133 +371,112 @@ class Component extends React.Component {
       barSt:s.barOpen?'max-height:48px;opacity:1;margin-bottom:12px':'max-height:0;opacity:0;margin-top:0;margin-bottom:0;overflow:hidden;pointer-events:none',
       barT:this.barT,barGlyph:s.barOpen?'▲':'▼',barTip:s.barOpen?'Collapse header':'Expand header',
       themeT:this.themeT,themeOpen:s.themeOpen,
-      themeBd:s.themeOpen?this.hexA(ac,.55):'rgba(255,255,255,.16)',
-      themeBg:s.themeOpen?this.hexA(ac,.14):'transparent',
-      themeFg:s.themeOpen?ac:'rgba(255,255,255,.65)',
+      themeBd:s.themeOpen?this.hexA(ac,.55):'rgba(255,255,255,.16)',themeBg:s.themeOpen?this.hexA(ac,.14):'transparent',themeFg:s.themeOpen?ac:'rgba(255,255,255,.65)',
       themeItems:this.themes.map(th=>({name:th.name,
         swatch:th.key==='adapt'?'conic-gradient(#4fd8c0,#f0956b,#7d9bef,#d97fd0,#4fd8c0)':th.key,
         fg:s.theme===th.key?ac:'rgba(255,255,255,.75)',
-        pick:()=>this.setState({theme:th.key,themeOpen:false},()=>this.save())})),
+        pick:()=>this.setState({theme:th.key,themeOpen:false},()=>{this.save();if(th.key==='adapt'&&tk)this.extractColor(tk.artUrl);})})),
       menuT:this.menuT,menuOpen:s.menuOpen,
-      menuBd:s.menuOpen?this.hexA(ac,.55):'rgba(255,255,255,.16)',
-      menuBg:s.menuOpen?this.hexA(ac,.14):'transparent',
-      menuFg:s.menuOpen?ac:'rgba(255,255,255,.65)',
+      menuBd:s.menuOpen?this.hexA(ac,.55):'rgba(255,255,255,.16)',menuBg:s.menuOpen?this.hexA(ac,.14):'transparent',menuFg:s.menuOpen?ac:'rgba(255,255,255,.65)',
       menuItems:this.WDEF.map(def=>{const on=s.w[def.id].on;return{name:def.name,
-        dot:on?ac:'rgba(255,255,255,.15)',fg:on?'#ffffff':'rgba(255,255,255,.45)',
-        toggle:()=>this.setW(def.id,{on:!on})};}),
+        dot:on?ac:'rgba(255,255,255,.15)',fg:on?'#ffffff':'rgba(255,255,255,.45)',toggle:()=>this.setW(def.id,{on:!on})};}),
       vizRef:this.vizRef,lyrRef:this.lyrRef,
-      vizChips:['bars','wave','ring','blob'].map(n=>({name:n.toUpperCase(),pick:()=>{this.setState({viz:n},()=>this.save());},
-        bg:mode===n?this.hexA(ac,.16):'transparent',bd:mode===n?this.hexA(ac,.55):'rgba(255,255,255,.14)',fg:mode===n?ac:'rgba(255,255,255,.5)'})),
-      lines:sg.lyrics.map((l,i)=>({text:l[1],go:()=>this.setState({t:l[0]}),
-        st:{padding:'6px 0',fontSize:'15.5px',lineHeight:'1.4',cursor:'pointer',transition:'color .35s',
-          fontWeight:i===act?600:400,color:i===act?'#ffffff':(i<act?'rgba(255,255,255,.28)':'rgba(255,255,255,.48)')}})),
-      queueItems:s.queue.map((si,pos)=>({title:this.songs[si].title,artist:this.songs[si].artist,dur:this.fmt(this.songs[si].dur),art:this.songs[si].art,go:()=>this.goQueue(pos)})),
-      playlists:this.plDefs.map((p,pi)=>({name:p.name,count:p.tracks.length,
-        len:this.fmt(p.tracks.reduce((a,ti)=>a+this.songs[ti].dur,0)),
-        art:this.songs[p.tracks[0]].art,fg:s.activePl===pi?ac:'#ffffff',
-        play:()=>this.playPl(pi)})),
+      vizChips:['bars','wave','ring','blob'].map(n=>({name:n.toUpperCase(),pick:()=>this.setState({viz:n},()=>this.save()),
+        bg:this.vizMode()===n?this.hexA(ac,.16):'transparent',bd:this.vizMode()===n?this.hexA(ac,.55):'rgba(255,255,255,.14)',fg:this.vizMode()===n?ac:'rgba(255,255,255,.5)'})),
+      queueItems:s.queue.map(q=>({title:q.title,artist:q.artist,dur:this.fmt(q.dur),artUrl:q.artUrl,go:()=>this.playUris([q.uri])})),
+      playlists:s.playlists.map((p,pi)=>({name:p.name,count:p.count,owner:p.owner,artUrl:p.artUrl,
+        fg:s.activePl===pi?ac:'#ffffff',play:()=>this.playContext(p.uri,pi)})),
       eqBands:s.eq.map((v,i)=>({h:(8+v*92)+'%',label:['60','250','1K','4K','12K'][i],
         bg:'linear-gradient(180deg,'+this.hexA(ac,.9)+','+this.hexA(ac,.3)+')',
-        down:(e)=>this.barDrag(e,(fx,fy)=>this.setState(st=>{const eq=st.eq.slice();eq[i]=fy;return{eq:eq};}))})),
-      devices:this.deviceList.map((dv,i)=>({name:dv.name,type:dv.type,pick:()=>this.setState({device:i}),
-        dot:i===s.device?ac:'rgba(255,255,255,.18)',fg:i===s.device?'#ffffff':'rgba(255,255,255,.6)'})),
-      recs:pool.map(i=>({title:this.songs[i].title,artist:this.songs[i].artist,art:this.songs[i].art,
-        bd:this.hexA(ac,.45),fg:ac,add:()=>this.setState(st=>({queue:[...st.queue,i]}))})),
-      statMin:47+Math.floor(s.listen/60),statTracks:s.played,statTop:this.songs[top].artist,
-      clockTime:pad(hr)+':'+pad(d.getMinutes())+secs,
+        down:(e)=>this.barDrag(e,(fx,fy)=>this.setState(st=>{const eq=st.eq.slice();eq[i]=fy;return{eq};}))})),
+      devices:s.devices.map(dv=>({name:dv.name,type:(dv.type||'').toUpperCase(),pick:()=>this.transfer(dv.id,true),
+        dot:dv.is_active?ac:'rgba(255,255,255,.18)',fg:dv.is_active?'#ffffff':'rgba(255,255,255,.6)'})),
+      recs:s.topTracks.slice(0,2).map(r=>({title:r.title,artist:r.artist,artUrl:r.artUrl,
+        bd:this.hexA(ac,.45),fg:ac,add:()=>this.addQueue(r.uri)})),
+      statMin:Math.floor(s.listen/60),statTracks:s.played,statTop:s.topArtist||(tk?tk.artist:'—'),
+      clockTime:pad(hr)+':'+pad(d.getMinutes()),
       clockDate:d.toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'}),
       greeting:hr<5?'LATE NIGHT':hr<12?'GOOD MORNING':hr<18?'GOOD AFTERNOON':'GOOD EVENING',
-      hist:s.history.map(i=>({title:this.songs[i].title,art:this.songs[i].art}))
+      hist:s.recent.map(h=>({title:h.title,artUrl:h.artUrl}))
     };
   }
 
-  // --- render helpers ------------------------------------------------------
-  ic(v,wid,on,title,glyph){
-    return <button data-wid={wid} onClick={on} title={title} className="hw"
-      style={css("border:none;background:transparent;cursor:pointer;padding:2px 5px;color:rgba(255,255,255,.35);font-size:11px;line-height:1")}>{glyph}</button>;
-  }
-  ctrls(v,wid,sz){
-    return <span style={css("margin-left:auto;display:flex;gap:2px;align-items:center")}>
-      {sz && this.ic(v,wid,v.szClick,"Resize","⇲")}
-      {this.ic(v,wid,v.fsClick,"Fullscreen","⤢")}
-      {this.ic(v,wid,v.rmClick,"Remove","✕")}
-      <span style={css("color:rgba(255,255,255,.22);font-size:12px")}>{"⠿"}</span>
-    </span>;
-  }
-  head(v,wid,label,padPx,sz){
-    return <div draggable="true" data-wid={wid} onDragStart={v.dragStart}
-      style={css("display:flex;align-items:center;gap:8px;padding:"+padPx+";cursor:grab;user-select:none")}>
-      <span style={css("font:600 10px ui-monospace,Menlo,monospace;letter-spacing:.16em;color:rgba(255,255,255,.4)")}>{label}</span>
-      {this.ctrls(v,wid,sz)}
-    </div>;
-  }
-  card(v,wid,lay,children){
-    return <div data-wid={wid} onDragOver={v.dragOver} onDragLeave={v.dragLeave} onDrop={v.drop}
-      style={css(`background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.08);border-radius:18px;overflow:hidden;display:flex;flex-direction:column;${lay}`)}>
-      {children}
-    </div>;
-  }
+  // --- render helpers -------------------------------------------------------
+  ic(wid,on,title,glyph){return <button data-wid={wid} onClick={on} title={title} className="hw"
+    style={css("border:none;background:transparent;cursor:pointer;padding:2px 5px;color:rgba(255,255,255,.35);font-size:11px;line-height:1")}>{glyph}</button>;}
+  ctrls(v,wid,sz){return <span style={css("margin-left:auto;display:flex;gap:2px;align-items:center")}>
+    {sz&&this.ic(wid,v.szClick,"Resize","⇲")}{this.ic(wid,v.fsClick,"Fullscreen","⤢")}{this.ic(wid,v.rmClick,"Remove","✕")}
+    <span style={css("color:rgba(255,255,255,.22);font-size:12px")}>{"⠿"}</span></span>;}
+  head(v,wid,label,padPx,sz){return <div draggable="true" data-wid={wid} onDragStart={v.dragStart}
+    style={css("display:flex;align-items:center;gap:8px;padding:"+padPx+";cursor:grab;user-select:none")}>
+    <span style={css("font:600 10px ui-monospace,Menlo,monospace;letter-spacing:.16em;color:rgba(255,255,255,.4)")}>{label}</span>
+    {this.ctrls(v,wid,sz)}</div>;}
+  card(v,wid,lay,children){return <div data-wid={wid} onDragOver={v.dragOver} onDragLeave={v.dragLeave} onDrop={v.drop}
+    style={css("background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.08);border-radius:18px;overflow:hidden;display:flex;flex-direction:column;"+lay)}>{children}</div>;}
 
   render(){
     const v=this.renderVals();
     return (
       <div style={css(`min-height:100vh;padding:20px 22px 26px;transition:background 1.2s;background:${v.bg}`)}>
 
+        {(this.state.status||this.state.error)&&(
+          <div style={css(`position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:200;display:flex;align-items:center;gap:9px;padding:8px 15px;border-radius:20px;font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;background:${this.state.error?'rgba(240,90,90,.16)':'rgba(255,255,255,.08)'};border:1px solid ${this.state.error?'rgba(240,90,90,.4)':'rgba(255,255,255,.14)'};color:${this.state.error?'#ff9d9d':'rgba(255,255,255,.7)'}`)}>
+            {!this.state.error&&<span style={css("width:11px;height:11px;border-radius:50%;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;display:inline-block;animation:spin .7s linear infinite")}></span>}
+            <span>{this.state.error||this.state.status}</span>
+            {this.state.error&&<span onClick={()=>this.setState({error:null})} style={css("cursor:pointer;margin-left:4px;opacity:.7")}>✕</span>}
+          </div>
+        )}
+
         {/* header bar */}
-        <div style={{...css("display:flex;align-items:center;gap:10px;margin:2px 6px;transition:max-height .35s,opacity .35s,margin .35s"), ...css(v.barSt)}}>
+        <div style={{...css("display:flex;align-items:center;gap:10px;margin:2px 6px;transition:max-height .35s,opacity .35s,margin .35s"),...css(v.barSt)}}>
           <span style={css(`font-family:'Archivo Black',sans-serif;font-size:26px;line-height:1;letter-spacing:.02em;text-transform:uppercase;background:${v.logoGrad};-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent`)}>Wax</span>
           <span style={css("font:500 10px ui-monospace,Menlo,monospace;letter-spacing:.16em;color:rgba(255,255,255,.4)")}>SESSION DASHBOARD</span>
           <span style={css("margin-left:auto;font:500 10px ui-monospace,Menlo,monospace;letter-spacing:.1em;color:rgba(255,255,255,.3)")}>DRAG HEADERS TO REARRANGE</span>
+          <button onClick={logout} title="Sign out of Spotify" className="hw" style={css("font:600 10px ui-monospace,Menlo,monospace;letter-spacing:.12em;padding:6px 12px;border-radius:16px;cursor:pointer;border:1px solid rgba(255,255,255,.16);background:transparent;color:rgba(255,255,255,.5)")}>SIGN OUT</button>
           <div style={css("position:relative;flex:none")}>
             <button onClick={v.themeT} style={css(`font:600 10px ui-monospace,Menlo,monospace;letter-spacing:.12em;padding:6px 12px;border-radius:16px;cursor:pointer;border:1px solid ${v.themeBd};background:${v.themeBg};color:${v.themeFg}`)}>THEME {"▾"}</button>
-            {v.themeOpen && (
+            {v.themeOpen&&(
               <div style={css("position:absolute;top:32px;right:0;z-index:90;background:#15161a;border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:6px;min-width:190px;box-shadow:0 20px 50px rgba(0,0,0,.55);animation:dropIn .18s cubic-bezier(.2,.9,.3,1.2) both;transform-origin:top right")}>
                 {v.themeItems.map((th,i)=>(
                   <div key={i} onClick={th.pick} className="hb6" style={css("display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:8px;cursor:pointer")}>
                     <span style={css(`width:12px;height:12px;border-radius:50%;flex:none;background:${th.swatch}`)}></span>
                     <span style={css(`font-size:13px;font-weight:500;color:${th.fg}`)}>{th.name}</span>
-                  </div>
-                ))}
-              </div>
-            )}
+                  </div>))}
+              </div>)}
           </div>
           <div style={css("position:relative;flex:none")}>
             <button onClick={v.menuT} style={css(`font:600 10px ui-monospace,Menlo,monospace;letter-spacing:.12em;padding:6px 12px;border-radius:16px;cursor:pointer;border:1px solid ${v.menuBd};background:${v.menuBg};color:${v.menuFg}`)}>WIDGETS {"▾"}</button>
-            {v.menuOpen && (
+            {v.menuOpen&&(
               <div style={css("position:absolute;top:32px;right:0;z-index:90;background:#15161a;border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:6px;min-width:210px;box-shadow:0 20px 50px rgba(0,0,0,.55);animation:dropIn .18s cubic-bezier(.2,.9,.3,1.2) both;transform-origin:top right")}>
                 {v.menuItems.map((m,i)=>(
                   <div key={i} onClick={m.toggle} className="hb6" style={css("display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:8px;cursor:pointer")}>
                     <span style={css(`width:7px;height:7px;border-radius:50%;flex:none;background:${m.dot}`)}></span>
                     <span style={css(`font-size:13px;font-weight:500;color:${m.fg}`)}>{m.name}</span>
-                  </div>
-                ))}
-              </div>
-            )}
+                  </div>))}
+              </div>)}
           </div>
         </div>
 
-        {/* header collapse toggle */}
         <div style={css("display:flex;justify-content:center;margin:0 0 10px")}>
           <button onClick={v.barT} title={v.barTip} className="hw" style={css("border:none;background:transparent;cursor:pointer;padding:2px 20px;color:rgba(255,255,255,.3);font-size:10px;line-height:1")}>{v.barGlyph}</button>
         </div>
 
-        {/* widget grid */}
         <div style={css("display:grid;grid-template-columns:repeat(4,1fr);grid-auto-rows:148px;gap:14px;grid-auto-flow:dense")}>
 
           {/* NOW PLAYING */}
-          {this.card(v,'now',v.layNow, <>
+          {this.card(v,'now',v.layNow,<>
             {this.head(v,'now','NOW PLAYING','10px 14px 0',false)}
             <div style={css("flex:1;display:flex;gap:18px;padding:10px 20px 18px;min-height:0;align-items:center")}>
-              <div style={css(`width:clamp(96px,34%,176px);flex:none;aspect-ratio:1;border-radius:14px;background:${v.artBg};box-shadow:0 14px 44px rgba(0,0,0,.5)`)}></div>
+              <div style={css(`width:clamp(96px,34%,176px);flex:none;aspect-ratio:1;border-radius:14px;${artCss(v.artUrl)};box-shadow:0 14px 44px rgba(0,0,0,.5)`)}></div>
               <div style={css("flex:1;min-width:0;display:flex;flex-direction:column;gap:4px")}>
                 <div style={css("font-size:28px;font-weight:700;line-height:1.12;letter-spacing:-.015em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{v.title}</div>
-                <div style={css("font-size:14px;color:rgba(255,255,255,.58);white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{v.artist} {"·"} {v.album}</div>
+                <div style={css("font-size:14px;color:rgba(255,255,255,.58);white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{v.artist}{v.album?" · "+v.album:''}</div>
                 <div style={css("display:flex;align-items:center;gap:clamp(6px,1.2vw,14px);margin-top:14px;flex-wrap:wrap")}>
                   <button onClick={v.shuffleT} style={css(`border:none;background:transparent;cursor:pointer;font:600 9.5px ui-monospace,Menlo,monospace;letter-spacing:.12em;padding:0;color:${v.shFg}`)}>SHFL</button>
                   <button onClick={v.prev} className="hw" style={css("border:none;background:transparent;cursor:pointer;padding:4px;color:rgba(255,255,255,.75);display:flex")}><svg width="15" height="15" viewBox="0 0 16 16"><path d="M12 2v12L5 8z" fill="currentColor"></path><rect x="3" y="2" width="1.7" height="12" fill="currentColor"></rect></svg></button>
                   <button onClick={v.toggle} className="hs" style={css(`width:46px;height:46px;border-radius:50%;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;background:${v.accent};color:#0b0c0e;flex:none;transition:transform .15s`)}>
-                    {v.playing && <svg width="15" height="15" viewBox="0 0 16 16"><rect x="3" y="2.5" width="3.6" height="11" rx="1" fill="currentColor"></rect><rect x="9.4" y="2.5" width="3.6" height="11" rx="1" fill="currentColor"></rect></svg>}
-                    {v.paused && <svg width="15" height="15" viewBox="0 0 16 16"><path d="M4.5 2.5l9.5 5.5-9.5 5.5z" fill="currentColor"></path></svg>}
+                    {v.playing&&<svg width="15" height="15" viewBox="0 0 16 16"><rect x="3" y="2.5" width="3.6" height="11" rx="1" fill="currentColor"></rect><rect x="9.4" y="2.5" width="3.6" height="11" rx="1" fill="currentColor"></rect></svg>}
+                    {v.paused&&<svg width="15" height="15" viewBox="0 0 16 16"><path d="M4.5 2.5l9.5 5.5-9.5 5.5z" fill="currentColor"></path></svg>}
                   </button>
                   <button onClick={v.next} className="hw" style={css("border:none;background:transparent;cursor:pointer;padding:4px;color:rgba(255,255,255,.75);display:flex")}><svg width="15" height="15" viewBox="0 0 16 16"><path d="M4 2v12l7-6z" fill="currentColor"></path><rect x="11.3" y="2" width="1.7" height="12" fill="currentColor"></rect></svg></button>
                   <button onClick={v.repeatT} style={css(`border:none;background:transparent;cursor:pointer;font:600 9.5px ui-monospace,Menlo,monospace;letter-spacing:.12em;padding:0;color:${v.rpFg}`)}>LOOP</button>
@@ -349,18 +495,14 @@ class Component extends React.Component {
           </>)}
 
           {/* VISUALIZER */}
-          {this.card(v,'viz',v.layViz, <>
+          {this.card(v,'viz',v.layViz,<>
             <div draggable="true" data-wid="viz" onDragStart={v.dragStart} style={css("display:flex;align-items:center;gap:6px;padding:10px 14px 6px;cursor:grab;user-select:none")}>
               <span style={css("font:600 10px ui-monospace,Menlo,monospace;letter-spacing:.16em;color:rgba(255,255,255,.4)")}>VISUALIZER</span>
               <span style={css("margin-left:auto;display:flex;gap:5px")}>
-                {v.vizChips.map((c,i)=>(
-                  <button key={i} onClick={c.pick} style={css(`font:600 9px ui-monospace,Menlo,monospace;letter-spacing:.08em;padding:4px 9px;border-radius:20px;cursor:pointer;border:1px solid ${c.bd};background:${c.bg};color:${c.fg}`)}>{c.name}</button>
-                ))}
+                {v.vizChips.map((c,i)=>(<button key={i} onClick={c.pick} style={css(`font:600 9px ui-monospace,Menlo,monospace;letter-spacing:.08em;padding:4px 9px;border-radius:20px;cursor:pointer;border:1px solid ${c.bd};background:${c.bg};color:${c.fg}`)}>{c.name}</button>))}
               </span>
               <span style={css("display:flex;gap:2px;align-items:center")}>
-                {this.ic(v,'viz',v.szClick,"Resize","⇲")}
-                {this.ic(v,'viz',v.fsClick,"Fullscreen","⤢")}
-                {this.ic(v,'viz',v.rmClick,"Remove","✕")}
+                {this.ic('viz',v.szClick,"Resize","⇲")}{this.ic('viz',v.fsClick,"Fullscreen","⤢")}{this.ic('viz',v.rmClick,"Remove","✕")}
                 <span style={css("color:rgba(255,255,255,.22);font-size:12px")}>{"⠿"}</span>
               </span>
             </div>
@@ -369,57 +511,55 @@ class Component extends React.Component {
             </div>
           </>)}
 
-          {/* LYRICS */}
-          {this.card(v,'lyrics',v.layLyrics, <>
+          {/* LYRICS (no Spotify lyrics API — informative empty state) */}
+          {this.card(v,'lyrics',v.layLyrics,<>
             {this.head(v,'lyrics','LYRICS','10px 14px 2px',true)}
-            <div ref={v.lyrRef} style={css("flex:1;min-height:0;overflow-y:auto;position:relative;padding:14px 16px 60px;scroll-behavior:smooth;-webkit-mask-image:linear-gradient(180deg,transparent,#000 14%,#000 82%,transparent);mask-image:linear-gradient(180deg,transparent,#000 14%,#000 82%,transparent)")}>
-              {v.lines.map((ln,i)=>(
-                <div key={i} onClick={ln.go} style={ln.st}>{ln.text}</div>
-              ))}
+            <div ref={v.lyrRef} style={css("flex:1;min-height:0;overflow-y:auto;position:relative;padding:14px 18px 40px;display:flex;flex-direction:column;justify-content:center")}>
+              <div style={css("font-size:14px;font-weight:600;color:rgba(255,255,255,.7);margin-bottom:6px")}>{v.title}</div>
+              <div style={css("font-size:12.5px;line-height:1.6;color:rgba(255,255,255,.4)")}>Synced lyrics aren't available through the Spotify Web API. Connect a lyrics provider (e.g. Musixmatch) to fill this widget.</div>
             </div>
           </>)}
 
           {/* QUEUE */}
-          {this.card(v,'queue',v.layQueue, <>
+          {this.card(v,'queue',v.layQueue,<>
             {this.head(v,'queue','UP NEXT · QUEUE','10px 14px 6px',true)}
             <div style={css("flex:1;min-height:0;overflow-y:auto;padding:2px 0 10px")}>
-              {v.queueItems.map((q,i)=>(
-                <div key={i} onClick={q.go} className="hb5" style={css("display:flex;align-items:center;gap:10px;padding:8px 16px;cursor:pointer")}>
-                  <div style={css(`width:36px;height:36px;border-radius:8px;flex:none;background:${q.art}`)}></div>
+              {v.queueItems.length?v.queueItems.map((q,i)=>(
+                <div key={i} onClick={q.go} title="Play now" className="hb5" style={css("display:flex;align-items:center;gap:10px;padding:8px 16px;cursor:pointer")}>
+                  <div style={css(`width:36px;height:36px;border-radius:8px;flex:none;${artCss(q.artUrl)}`)}></div>
                   <div style={css("min-width:0;flex:1")}>
                     <div style={css("font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{q.title}</div>
-                    <div style={css("font-size:11px;color:rgba(255,255,255,.5)")}>{q.artist}</div>
+                    <div style={css("font-size:11px;color:rgba(255,255,255,.5);white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{q.artist}</div>
                   </div>
                   <div style={css("font:10.5px ui-monospace,Menlo,monospace;color:rgba(255,255,255,.4)")}>{q.dur}</div>
                 </div>
-              ))}
+              )):<div style={css("padding:16px;font-size:12px;color:rgba(255,255,255,.35)")}>Queue is empty.</div>}
             </div>
           </>)}
 
           {/* PLAYLISTS */}
-          {this.card(v,'pl',v.layPl, <>
+          {this.card(v,'pl',v.layPl,<>
             {this.head(v,'pl','PLAYLISTS','10px 14px 6px',true)}
             <div style={css("flex:1;min-height:0;overflow-y:auto;padding:2px 0 10px")}>
-              {v.playlists.map((p,i)=>(
-                <div key={i} onClick={p.play} className="hb5" style={css("display:flex;align-items:center;gap:10px;padding:8px 16px;cursor:pointer")}>
-                  <div style={css(`width:36px;height:36px;border-radius:8px;flex:none;background:${p.art};display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.85)`)}><svg width="11" height="11" viewBox="0 0 16 16"><path d="M4.5 2.5l9.5 5.5-9.5 5.5z" fill="currentColor"></path></svg></div>
+              {v.playlists.length?v.playlists.map((p,i)=>(
+                <div key={i} onClick={p.play} title="Play playlist" className="hb5" style={css("display:flex;align-items:center;gap:10px;padding:8px 16px;cursor:pointer")}>
+                  <div style={css(`width:36px;height:36px;border-radius:8px;flex:none;${artCss(p.artUrl)}`)}></div>
                   <div style={css("min-width:0;flex:1")}>
                     <div style={css(`font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:${p.fg}`)}>{p.name}</div>
-                    <div style={css("font-size:11px;color:rgba(255,255,255,.5)")}>{p.count} tracks {"·"} {p.len}</div>
+                    <div style={css("font-size:11px;color:rgba(255,255,255,.5);white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{p.count} tracks{p.owner?" · "+p.owner:''}</div>
                   </div>
                 </div>
-              ))}
+              )):<div style={css("padding:16px;font-size:12px;color:rgba(255,255,255,.35)")}>No playlists found.</div>}
             </div>
           </>)}
 
-          {/* VOLUME & EQ */}
-          {this.card(v,'eq',v.layEq, <>
+          {/* VOLUME & EQ (volume is live; EQ bands are cosmetic — no Web API EQ) */}
+          {this.card(v,'eq',v.layEq,<>
             <div draggable="true" data-wid="eq" onDragStart={v.dragStart} style={css("display:flex;align-items:center;gap:8px;padding:10px 14px 4px;cursor:grab;user-select:none")}>
               <span style={css("font:600 10px ui-monospace,Menlo,monospace;letter-spacing:.16em;color:rgba(255,255,255,.4)")}>VOLUME & EQ</span>
               <span style={css("margin-left:auto;font:10px ui-monospace,Menlo,monospace;color:rgba(255,255,255,.45)")}>{v.volPct}</span>
               <span style={css("display:flex;gap:2px;align-items:center")}>
-                {this.ic(v,'eq',v.fsClick,"Fullscreen","⤢")}
-                {this.ic(v,'eq',v.rmClick,"Remove","✕")}
+                {this.ic('eq',v.fsClick,"Fullscreen","⤢")}{this.ic('eq',v.rmClick,"Remove","✕")}
                 <span style={css("color:rgba(255,255,255,.22);font-size:12px")}>{"⠿"}</span>
               </span>
             </div>
@@ -441,38 +581,38 @@ class Component extends React.Component {
           </>)}
 
           {/* OUTPUT */}
-          {this.card(v,'dev',v.layDev, <>
+          {this.card(v,'dev',v.layDev,<>
             {this.head(v,'dev','OUTPUT','10px 14px 4px',false)}
             <div style={css("flex:1;min-height:0;overflow-y:auto;padding:2px 0 8px")}>
-              {v.devices.map((d,i)=>(
-                <div key={i} onClick={d.pick} className="hb5" style={css("display:flex;align-items:center;gap:10px;padding:7px 16px;cursor:pointer")}>
+              {v.devices.length?v.devices.map((d,i)=>(
+                <div key={i} onClick={d.pick} title="Transfer playback" className="hb5" style={css("display:flex;align-items:center;gap:10px;padding:7px 16px;cursor:pointer")}>
                   <span style={css(`width:7px;height:7px;border-radius:50%;flex:none;background:${d.dot}`)}></span>
                   <span style={css(`font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:${d.fg}`)}>{d.name}</span>
                   <span style={css("margin-left:auto;flex:none;font:9px ui-monospace,Menlo,monospace;letter-spacing:.12em;color:rgba(255,255,255,.32)")}>{d.type}</span>
                 </div>
-              ))}
+              )):<div style={css("padding:16px;font-size:12px;color:rgba(255,255,255,.35)")}>No devices found.</div>}
             </div>
           </>)}
 
-          {/* SUGGESTIONS */}
-          {this.card(v,'recs',v.layRecs, <>
-            {this.head(v,'recs','SUGGESTED FOR THIS SESSION','10px 14px 6px',false)}
+          {/* SUGGESTIONS (your Top Tracks — recommendations API is disabled for new apps) */}
+          {this.card(v,'recs',v.layRecs,<>
+            {this.head(v,'recs','SUGGESTED · YOUR TOP TRACKS','10px 14px 6px',false)}
             <div style={css("flex:1;min-height:0;display:flex;gap:10px;padding:2px 16px 14px;align-items:stretch")}>
-              {v.recs.map((r,i)=>(
+              {v.recs.length?v.recs.map((r,i)=>(
                 <div key={i} style={css("flex:1;display:flex;align-items:center;gap:10px;border:1px solid rgba(255,255,255,.07);border-radius:12px;padding:8px 10px;min-width:0")}>
-                  <div style={css(`width:42px;height:42px;border-radius:9px;flex:none;background:${r.art}`)}></div>
+                  <div style={css(`width:42px;height:42px;border-radius:9px;flex:none;${artCss(r.artUrl)}`)}></div>
                   <div style={css("min-width:0;flex:1")}>
                     <div style={css("font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{r.title}</div>
                     <div style={css("font-size:11px;color:rgba(255,255,255,.5);white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{r.artist}</div>
                   </div>
                   <button onClick={r.add} className="hb6" style={css(`flex:none;white-space:nowrap;font:600 9px ui-monospace,Menlo,monospace;letter-spacing:.08em;padding:5px 9px;border-radius:14px;cursor:pointer;background:transparent;border:1px solid ${r.bd};color:${r.fg}`)}>+ QUEUE</button>
                 </div>
-              ))}
+              )):<div style={css("padding:14px;font-size:12px;color:rgba(255,255,255,.35)")}>Not enough listening history yet.</div>}
             </div>
           </>)}
 
           {/* SESSION STATS */}
-          {this.card(v,'stats',v.layStats, <>
+          {this.card(v,'stats',v.layStats,<>
             {this.head(v,'stats','SESSION','10px 14px 0',false)}
             <div style={css("flex:1;display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;padding:4px 16px 12px;align-content:center")}>
               <div>
@@ -491,7 +631,7 @@ class Component extends React.Component {
           </>)}
 
           {/* CLOCK */}
-          {this.card(v,'clock',v.layClock, <>
+          {this.card(v,'clock',v.layClock,<>
             {this.head(v,'clock','CLOCK','10px 14px 0',false)}
             <div style={css("flex:1;display:flex;flex-direction:column;justify-content:center;padding:0 16px 12px")}>
               <div style={css("font-size:32px;font-weight:700;letter-spacing:-.01em;font-variant-numeric:tabular-nums;line-height:1.1")}>{v.clockTime}</div>
@@ -501,12 +641,12 @@ class Component extends React.Component {
           </>)}
 
           {/* RECENTLY PLAYED */}
-          {this.card(v,'hist',v.layHist, <>
+          {this.card(v,'hist',v.layHist,<>
             {this.head(v,'hist','RECENTLY PLAYED','10px 14px 4px',true)}
             <div style={css(`flex:1;min-height:0;display:flex;gap:10px;padding:2px 16px 12px;overflow-x:auto;align-items:flex-start;flex-wrap:${v.histWrap}`)}>
               {v.hist.map((h,i)=>(
                 <div key={i} style={css("flex:none;width:72px")}>
-                  <div style={css(`width:72px;height:64px;border-radius:10px;background:${h.art}`)}></div>
+                  <div style={css(`width:72px;height:64px;border-radius:10px;${artCss(h.artUrl)}`)}></div>
                   <div style={css("font-size:9.5px;color:rgba(255,255,255,.5);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{h.title}</div>
                 </div>
               ))}
@@ -519,7 +659,62 @@ class Component extends React.Component {
   }
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(<Component/>);
+// ---------------------------------------------------------------------------
+// Connect screen (shown until a valid Spotify token exists)
+// ---------------------------------------------------------------------------
+function Connect({error}){
+  const box=css("min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px");
+  const card=css("width:100%;max-width:440px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.09);border-radius:20px;padding:34px 30px");
+  return (
+    <div style={box}>
+      <div style={card}>
+        <div style={css("font-family:'Archivo Black',sans-serif;font-size:40px;text-transform:uppercase;letter-spacing:.02em;background:linear-gradient(135deg,#4fd8c0 10%,#fff 60%,rgba(79,216,192,.55));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent")}>Wax</div>
+        <div style={css("font:600 10px ui-monospace,Menlo,monospace;letter-spacing:.16em;color:rgba(255,255,255,.4);margin-top:4px")}>SESSION DASHBOARD · SPOTIFY</div>
+        <p style={css("font-size:13.5px;line-height:1.6;color:rgba(255,255,255,.6);margin:22px 0 20px")}>Connect your Spotify Premium account to control playback, browse your playlists, and drive the dashboard with live data. Audio plays right in this tab.</p>
+        {error&&<div style={css("font-size:12px;color:#ff9d9d;background:rgba(240,90,90,.12);border:1px solid rgba(240,90,90,.3);border-radius:10px;padding:9px 12px;margin-bottom:16px")}>{error}</div>}
+        {CONFIGURED?(
+          <button onClick={beginAuth} className="spgreen" style={css("width:100%;border:none;border-radius:24px;padding:14px;background:#1db954;color:#04120a;font-size:14px;font-weight:700;letter-spacing:.02em;cursor:pointer;transition:transform .15s,background .15s")}>Connect Spotify</button>
+        ):(
+          <div style={css("font-size:12.5px;line-height:1.7;color:rgba(255,255,255,.6);background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:14px 16px")}>
+            <b style={css("color:#fff")}>Setup needed.</b> Open <code style={css("color:#7fd0bf")}>index.html</code> and set <code style={css("color:#7fd0bf")}>CONFIG.clientId</code> to your Spotify app's Client ID.
+          </div>
+        )}
+        <div style={css("margin-top:22px;padding-top:18px;border-top:1px solid rgba(255,255,255,.08);font-size:11.5px;line-height:1.7;color:rgba(255,255,255,.45)")}>
+          <div style={css("font:600 9px ui-monospace,Menlo,monospace;letter-spacing:.14em;color:rgba(255,255,255,.35);margin-bottom:6px")}>REDIRECT URI TO REGISTER</div>
+          <code style={css("display:block;word-break:break-all;color:#aee7da;background:rgba(0,0,0,.3);border-radius:8px;padding:8px 10px;font-size:11.5px")}>{REDIRECT_URI}</code>
+          <div style={css("margin-top:8px")}>Add this exact value under your app's <b>Redirect URIs</b> at developer.spotify.com/dashboard.</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function App(){
+  const [ready,setReady]=React.useState(false);
+  const [authed,setAuthed]=React.useState(false);
+  const [error,setError]=React.useState(null);
+  React.useEffect(()=>{(async()=>{
+    const url=new URL(location.href);
+    const code=url.searchParams.get('code');
+    const authErr=url.searchParams.get('error');
+    if(authErr){setError('Authorization was cancelled or denied.');}
+    if(code){
+      const st=url.searchParams.get('state');
+      const saved=sessionStorage.getItem('wax-auth-state');
+      try{
+        if(saved&&st&&saved!==st) throw new Error('State mismatch — please try again.');
+        await exchangeCode(code);
+      }catch(e){setError(String(e.message||e));}
+      history.replaceState({},'',REDIRECT_URI);
+    }
+    let tok=null; try{tok=await validToken();}catch(e){}
+    setAuthed(!!tok); setReady(true);
+  })();},[]);
+  if(!ready) return <div style={css("min-height:100vh")}></div>;
+  return authed? <Dashboard/> : <Connect error={error}/>;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
 </script>
 </body>
 </html>
