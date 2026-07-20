@@ -180,7 +180,7 @@ class Dashboard extends React.Component {
       {id:'hist',name:'Recently Played',span:[2,1],alt:[4,1]}
     ];
     this.themes=[{name:'Adapt to art',key:'adapt'},{name:'Teal',key:'#4fd8c0'},{name:'Ember',key:'#f0956b'},{name:'Cobalt',key:'#7d9bef'},{name:'Lime',key:'#9ed36a'},{name:'Orchid',key:'#d97fd0'},{name:'Gold',key:'#f2c95c'}];
-    this.vizRef=React.createRef(); this.lyrRef=React.createRef();
+    this.vizRef=React.createRef(); this.lyrRef=React.createRef(); this.gridRef=React.createRef();
     let saved={}; try{saved=JSON.parse(localStorage.getItem('wax-dash')||'{}')}catch(e){}
     const w={}; this.WDEF.forEach((d,i)=>{const sv=saved.w&&saved.w[d.id];
       w[d.id]={o:sv&&typeof sv.o==='number'?sv.o:i,on:sv?!!sv.on:true,big:sv?!!sv.big:false};});
@@ -195,7 +195,9 @@ class Dashboard extends React.Component {
       viz:saved.viz||null,eq:(saved.eq&&saved.eq.length===5)?saved.eq:DEFAULT_EQ.slice(),eqPreset:saved.eqPreset||'Default',
       theme:saved.theme||'adapt',barOpen:saved.barOpen===undefined?true:!!saved.barOpen,
       // status + session
-      status:'Connecting…',error:null,clock:new Date(),listen:0,played:0
+      status:'Connecting…',error:null,clock:new Date(),listen:0,played:0,
+      // responsive layout
+      vw:window.innerWidth,gridH:null
     };
     this.deviceId=null; this._lastTrackId=null;
   }
@@ -220,13 +222,26 @@ class Dashboard extends React.Component {
     window.addEventListener('keydown',this._esc);
     const loop=(ts)=>{this._raf=requestAnimationFrame(loop);this.drawViz(ts/1000);};
     this._raf=requestAnimationFrame(loop);
+    this._onResize=()=>{this.setState({vw:window.innerWidth});this.measureGrid();};
+    window.addEventListener('resize',this._onResize);
+    this.measureGrid();
   }
   componentWillUnmount(){[this._clk,this._tick,this._sync,this._poll,this._reci].forEach(clearInterval);
     cancelAnimationFrame(this._raf);window.removeEventListener('keydown',this._esc);
+    window.removeEventListener('resize',this._onResize);
     if(this.player)this.player.disconnect();}
   componentDidUpdate(){const a=this.actLine();
     if(a!==this._lastA){this._lastA=a;const el=this.lyrRef.current;
-      if(el&&a>=0&&el.children[a])el.scrollTop=el.children[a].offsetTop-el.clientHeight/2+14;}}
+      if(el&&a>=0&&el.children[a])el.scrollTop=el.children[a].offsetTop-el.clientHeight/2+14;}
+    this.measureGrid();}
+  // columns shrink on narrower/portrait screens; rows stretch to fill height
+  cols(){const vw=this.state.vw;return vw>=1180?4:vw>=860?3:vw>=560?2:1;}
+  gridStyle(){const h=this.state.gridH;
+    return 'display:grid;grid-template-columns:repeat('+this.cols()+',1fr);grid-auto-rows:minmax(150px,1fr);gap:14px;grid-auto-flow:dense'+(h?';height:'+h+'px':'');}
+  measureGrid(){const el=this.gridRef.current;if(!el)return;
+    const top=el.getBoundingClientRect().top;
+    const h=Math.max(300,Math.round(window.innerHeight-top-26));
+    if(Math.abs((this.state.gridH||0)-h)>2)this.setState({gridH:h});}
 
   initPlayer(){
     const player=new Spotify.Player({name:'Wax',volume:this.state.vol,
@@ -486,7 +501,7 @@ class Dashboard extends React.Component {
           <button onClick={v.barT} title={v.barTip} className="hw" style={css("border:none;background:transparent;cursor:pointer;padding:2px 20px;color:rgba(255,255,255,.3);font-size:10px;line-height:1")}>{v.barGlyph}</button>
         </div>
 
-        <div style={css("display:grid;grid-template-columns:repeat(4,1fr);grid-auto-rows:148px;gap:14px;grid-auto-flow:dense")}>
+        <div ref={this.gridRef} style={css(this.gridStyle())}>
 
           {/* NOW PLAYING */}
           {this.card(v,'now',v.layNow,<>
