@@ -72,6 +72,7 @@ or pick a playlist to start audio in the tab.
 | Suggestions | `GET /me/top/tracks` → `POST /me/player/queue` |
 | Session · Top Artist | `GET /me/top/artists` |
 | Recently Played | `GET /me/player/recently-played` |
+| Lyrics (time-synced, click-to-seek) | [LRCLIB](https://lrclib.net) — free, keyless, CORS |
 | "Adapt to art" theme | dominant color sampled from album art on a canvas |
 
 ## Known Spotify limits (handled gracefully)
@@ -79,8 +80,11 @@ or pick a playlist to start audio in the tab.
 - **EQ** — the Web API has no equalizer, so the bands are cosmetic. The volume slider above them is live.
 - **Visualizer** — Spotify audio is DRM-protected with no PCM/FFT access; this is a procedural
   animation that reacts to real play/pause and the accent color, not a true spectrum.
-- **Lyrics** — Spotify has no public lyrics API. The widget shows the track and a note; wire in a
-  provider (Musixmatch, LRCLIB) to populate it.
+- **Lyrics** — Spotify has no lyrics API, so lyrics come from [LRCLIB](https://lrclib.net) instead
+  (free, no key, CORS-enabled). Time-synced lyrics highlight and scroll with playback and are
+  click-to-seek; tracks with only plain lyrics show unsynced text, and unmatched tracks show a note.
+  (Musixmatch's free tier can't do this — it caps lyrics to a ~30% excerpt, gates synced lyrics
+  behind a paid plan, and has no CORS, so it would need a backend proxy.)
 - **Suggestions** use Top Tracks because `/recommendations` was disabled for newly-created apps (late 2024).
 - **Queue reorder / jump-to-index** isn't exposed by the API; clicking a queue row plays that track directly.
 
@@ -98,7 +102,6 @@ refresh; tokens live in `localStorage`. No bundler, no backend.
 
 ## Roadmap
 
-- Real synced lyrics via a third-party provider
 - Progress-synced visualizer
 - Richer, persisted listening stats
 - Friendlier "no active device" and token-expiry handling

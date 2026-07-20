@@ -146,6 +146,18 @@ function mapTrack(t){if(!t)return null;
     artUrl:at(0),            // largest (~640px) — Now Playing hero art
     artThumb:at(1),          // mid (~300px) — list thumbnails
     dur:Math.round((t.duration_ms||0)/1000)};}
+// Parse an LRC lyric string into sorted {t (seconds), text} lines.
+function parseLrc(lrc){
+  const out=[],re=/\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]/g;
+  String(lrc||'').split('\n').forEach(line=>{
+    const stamps=line.match(re); if(!stamps)return;
+    const text=line.replace(re,'').trim();
+    stamps.forEach(s=>{const m=s.match(/\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]/);
+      const t=(+m[1])*60+(+m[2])+(m[3]?(+((m[3]+'00').slice(0,3)))/1000:0);
+      out.push({t,text});});
+  });
+  return out.sort((a,b)=>a.t-b.t);
+}
 const DEFAULT_EQ=[.5,.62,.55,.42,.5];
 const EQ_PRESETS=[
   ['Flat',[.5,.5,.5,.5,.5]],
@@ -190,6 +202,8 @@ class Dashboard extends React.Component {
       artColor:null,
       // remote data (Web API)
       devices:[],queue:[],playlists:[],recent:[],topTracks:[],topArtist:'',
+      // lyrics (LRCLIB)
+      lyrics:null,lyricsPlain:null,lyricsState:'none',lyricsFor:null,
       // ui
       w,fs:null,menuOpen:false,themeOpen:false,activePl:null,
       viz:saved.viz||null,eq:(saved.eq&&saved.eq.length===5)?saved.eq:DEFAULT_EQ.slice(),eqPreset:saved.eqPreset||'Default',
@@ -199,7 +213,7 @@ class Dashboard extends React.Component {
       // responsive layout
       vw:window.innerWidth,gridH:null
     };
-    this.deviceId=null; this._lastTrackId=null;
+    this.deviceId=null; this._lastTrackId=null; this._lyrCache={};
   }
   // --- utilities ------------------------------------------------------------
   hexA(h,a){const n=parseInt(h.slice(1),16);return 'rgba('+(n>>16&255)+','+(n>>8&255)+','+(n&255)+','+a+')';}
@@ -268,7 +282,36 @@ class Dashboard extends React.Component {
       shuffle:!!st.shuffle,repeat:st.repeat_mode|0,
       played:(prev&&prev!==t.id)?s.played+1:s.played}));
     if(prev!==t.id){this._lastTrackId=t.id;this.refreshLiked(t.id);this.refreshQueue();
-      this.extractColor(t.artUrl);}
+      this.extractColor(t.artUrl);this.fetchLyrics(t);}
+  }
+  // Fetch synced/plain lyrics from LRCLIB (free, no key, CORS-enabled).
+  async fetchLyrics(track){
+    if(!track){this.setState({lyrics:null,lyricsPlain:null,lyricsState:'none',lyricsFor:null});return;}
+    const id=track.id; this._lyrReq=id;
+    const cached=this._lyrCache[id];
+    if(cached){this.setState({lyrics:cached.synced,lyricsPlain:cached.plain,lyricsState:cached.state,lyricsFor:id});return;}
+    this.setState({lyrics:null,lyricsPlain:null,lyricsState:'loading',lyricsFor:id});
+    const artist=(track.artist||'').split(',')[0].trim();
+    const apply=(synced,plain,state)=>{this._lyrCache[id]={synced,plain,state};
+      if(this._lyrReq===id)this.setState({lyrics:synced,lyricsPlain:plain,lyricsState:state,lyricsFor:id});};
+    const useRec=(rec)=>{
+      if(!rec)return false;
+      if(rec.instrumental){apply(null,null,'instrumental');return true;}
+      if(rec.syncedLyrics){const s=parseLrc(rec.syncedLyrics);if(s.length){apply(s,null,'synced');return true;}}
+      if(rec.plainLyrics){apply(null,rec.plainLyrics.split('\n'),'plain');return true;}
+      return false;};
+    try{
+      const g=new URLSearchParams({artist_name:artist,track_name:track.title,album_name:track.album||'',duration:String(track.dur||'')});
+      let r=await fetch('https://lrclib.net/api/get?'+g.toString());
+      if(r.ok&&useRec(await r.json()))return;
+      const q=new URLSearchParams({track_name:track.title,artist_name:artist});
+      r=await fetch('https://lrclib.net/api/search?'+q.toString());
+      if(r.ok){const arr=await r.json();
+        if(Array.isArray(arr)&&arr.length){const dur=track.dur||0,sync=arr.filter(x=>x.syncedLyrics);
+          const best=(sync.length?sync:arr).slice().sort((a,b)=>Math.abs((a.duration||0)-dur)-Math.abs((b.duration||0)-dur))[0];
+          if(useRec(best))return;}}
+      apply(null,null,'none');
+    }catch(e){if(this._lyrReq===id)this.setState({lyricsState:'none'});}
   }
   extractColor(url){
     if(this.state.theme!=='adapt'){return;}
@@ -354,7 +397,9 @@ class Dashboard extends React.Component {
     return 'order:'+st.o+';grid-column:span '+sp[0]+';grid-row:span '+sp[1];}
 
   // --- visualizer (procedural; reacts to real play/pause state) --------------
-  actLine(){return -1;} // no lyrics source; kept for scroll hook compatibility
+  actLine(){const L=this.state.lyrics;if(this.state.lyricsState!=='synced'||!L||!L.length)return -1;
+    const t=this.state.posMs/1000;if(t<L[0].t)return -1;
+    let a=0;for(let i=0;i<L.length;i++)if(t>=L[i].t)a=i;return a;}
   rr(x,a,b,w,h,r){r=Math.min(r,w/2,h/2);x.beginPath();x.moveTo(a+r,b);x.arcTo(a+w,b,a+w,b+h,r);x.arcTo(a+w,b+h,a,b+h,r);x.arcTo(a,b+h,a,b,r);x.arcTo(a,b,a+w,b,r);x.closePath();x.fill();}
   drawViz(t){const c=this.vizRef.current;if(!c)return;const w=c.clientWidth,h=c.clientHeight;if(!w||!h)return;
     const dpr=window.devicePixelRatio||1;
@@ -389,7 +434,7 @@ class Dashboard extends React.Component {
 
   // --- view model -----------------------------------------------------------
   renderVals(){
-    const s=this.state,tk=s.track,ac=this.accent(),glow=.7;
+    const s=this.state,tk=s.track,ac=this.accent(),glow=.7,act=this.actLine();
     const d=s.clock,hr=d.getHours(),pad=(n)=>String(n).padStart(2,'0');
     return {
       bg:'radial-gradient(1100px 720px at 16% -6%, '+this.hexA(ac,.22*glow)+', rgba(0,0,0,0) 62%), radial-gradient(900px 640px at 88% 108%, '+this.hexA(ac,.16*glow)+', rgba(0,0,0,0) 60%), #0b0c0e',
@@ -419,6 +464,11 @@ class Dashboard extends React.Component {
       menuItems:this.WDEF.map(def=>{const on=s.w[def.id].on;return{name:def.name,
         dot:on?ac:'rgba(255,255,255,.15)',fg:on?'#ffffff':'rgba(255,255,255,.45)',toggle:()=>this.setW(def.id,{on:!on})};}),
       vizRef:this.vizRef,lyrRef:this.lyrRef,
+      lyrState:s.lyricsState,plainLyrics:s.lyricsPlain||[],
+      lines:(s.lyricsState==='synced'&&s.lyrics)?s.lyrics.map((ln,i)=>({text:ln.text||'♪',
+        go:()=>{const ms=ln.t*1000;this.setState({posMs:ms});if(this.player)this.player.seek(ms);},
+        st:{padding:'6px 0',fontSize:'15.5px',lineHeight:'1.4',cursor:'pointer',transition:'color .35s',
+          fontWeight:i===act?600:400,color:i===act?'#ffffff':(i<act?'rgba(255,255,255,.28)':'rgba(255,255,255,.48)')}})):[],
       vizChips:['bars','wave','ring','blob'].map(n=>({name:n.toUpperCase(),pick:()=>this.setState({viz:n},()=>this.save()),
         bg:this.vizMode()===n?this.hexA(ac,.16):'transparent',bd:this.vizMode()===n?this.hexA(ac,.55):'rgba(255,255,255,.14)',fg:this.vizMode()===n?ac:'rgba(255,255,255,.5)'})),
       queueItems:s.queue.map(q=>({title:q.title,artist:q.artist,dur:this.fmt(q.dur),artUrl:q.artThumb,go:()=>this.playUris([q.uri])})),
@@ -551,13 +601,24 @@ class Dashboard extends React.Component {
             </div>
           </>)}
 
-          {/* LYRICS (no Spotify lyrics API — informative empty state) */}
+          {/* LYRICS (time-synced via LRCLIB, with plain-text fallback) */}
           {this.card(v,'lyrics',v.layLyrics,<>
             {this.head(v,'lyrics','LYRICS','10px 14px 2px',true)}
-            <div ref={v.lyrRef} style={css("flex:1;min-height:0;overflow-y:auto;position:relative;padding:14px 18px 40px;display:flex;flex-direction:column;justify-content:center")}>
-              <div style={css("font-size:14px;font-weight:600;color:rgba(255,255,255,.7);margin-bottom:6px")}>{v.title}</div>
-              <div style={css("font-size:12.5px;line-height:1.6;color:rgba(255,255,255,.4)")}>Synced lyrics aren't available through the Spotify Web API. Connect a lyrics provider (e.g. Musixmatch) to fill this widget.</div>
-            </div>
+            {v.lyrState==='synced'?(
+              <div ref={v.lyrRef} style={css("flex:1;min-height:0;overflow-y:auto;position:relative;padding:14px 16px 60px;scroll-behavior:smooth;-webkit-mask-image:linear-gradient(180deg,transparent,#000 14%,#000 82%,transparent);mask-image:linear-gradient(180deg,transparent,#000 14%,#000 82%,transparent)")}>
+                {v.lines.map((ln,i)=><div key={i} onClick={ln.go} style={ln.st}>{ln.text}</div>)}
+              </div>
+            ):v.lyrState==='plain'?(
+              <div style={css("flex:1;min-height:0;overflow-y:auto;padding:12px 16px 20px")}>
+                {v.plainLyrics.map((ln,i)=><div key={i} style={css("font-size:14px;line-height:1.55;color:rgba(255,255,255,.62);min-height:9px")}>{ln}</div>)}
+              </div>
+            ):(
+              <div style={css("flex:1;min-height:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;padding:14px 20px;text-align:center")}>
+                {v.lyrState==='loading'&&<span style={css("width:16px;height:16px;border-radius:50%;border:2px solid rgba(255,255,255,.2);border-top-color:#fff;display:inline-block;animation:spin .7s linear infinite")}></span>}
+                <div style={css("font-size:13px;color:rgba(255,255,255,.45)")}>{v.lyrState==='loading'?'Finding lyrics…':v.lyrState==='instrumental'?'♪ Instrumental':'No lyrics found for this track.'}</div>
+              </div>
+            )}
+            {(v.lyrState==='synced'||v.lyrState==='plain')&&<div style={css("padding:0 14px 8px;font:9px ui-monospace,Menlo,monospace;letter-spacing:.1em;color:rgba(255,255,255,.25);text-align:right")}>LYRICS · LRCLIB</div>}
           </>)}
 
           {/* QUEUE */}
