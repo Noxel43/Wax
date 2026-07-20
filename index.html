@@ -55,6 +55,10 @@ const REDIRECT_URI = location.origin + location.pathname;
 const TOKEN_KEY = 'wax-spotify-tokens';
 const VERIFIER_KEY = 'wax-pkce-verifier';
 const CONFIGURED = CONFIG.clientId && CONFIG.clientId !== 'PASTE_YOUR_CLIENT_ID_HERE';
+// Spotify rejects file:// redirect URIs and the Playback SDK needs a secure
+// context, so the app must be served over http://127.0.0.1 (or https).
+const SERVED_OK = location.protocol === 'http:' || location.protocol === 'https:';
+const SERVE_URL = 'http://127.0.0.1:5173/index.html';
 
 // --- PKCE auth --------------------------------------------------------------
 function randStr(n){const a=new Uint8Array(n);crypto.getRandomValues(a);
@@ -134,12 +138,23 @@ function artCss(url){return url?
   "background-color:#26272b;background-image:url('"+url+"');background-size:cover;background-position:center":
   "background:#26272b";}
 function mapTrack(t){if(!t)return null;
-  const imgs=(t.album&&t.album.images)||t.images||[];
+  const imgs=(t.album&&t.album.images)||t.images||[]; // Spotify orders images largest-first
+  const at=i=>imgs.length?(imgs[Math.min(i,imgs.length-1)]||imgs[0]).url:'';
   return {id:t.id,uri:t.uri,title:t.name||'',
     artist:(t.artists||[]).map(a=>a.name).join(', '),
     album:t.album?t.album.name:'',
-    artUrl:imgs.length?imgs[imgs.length>2?1:0].url:'',
+    artUrl:at(0),            // largest (~640px) — Now Playing hero art
+    artThumb:at(1),          // mid (~300px) — list thumbnails
     dur:Math.round((t.duration_ms||0)/1000)};}
+const DEFAULT_EQ=[.5,.62,.55,.42,.5];
+const EQ_PRESETS=[
+  ['Flat',[.5,.5,.5,.5,.5]],
+  ['Bass',[.92,.74,.52,.42,.4]],
+  ['Vocal',[.4,.5,.76,.7,.5]],
+  ['Treble',[.4,.42,.5,.72,.92]],
+  ['Rock',[.72,.52,.46,.6,.74]],
+  ['Elec',[.82,.56,.4,.56,.82]]
+];
 // tiny hsl round-trip so the "adapt" theme can pull a vivid accent from art
 function rgb2hsl(r,g,b){r/=255;g/=255;b/=255;const mx=Math.max(r,g,b),mn=Math.min(r,g,b);
   let h,s,l=(mx+mn)/2;if(mx===mn){h=s=0;}else{const d=mx-mn;s=l>.5?d/(2-mx-mn):d/(mx+mn);
@@ -177,7 +192,7 @@ class Dashboard extends React.Component {
       devices:[],queue:[],playlists:[],recent:[],topTracks:[],topArtist:'',
       // ui
       w,fs:null,menuOpen:false,themeOpen:false,activePl:null,
-      viz:saved.viz||null,eq:[.5,.62,.55,.42,.5],
+      viz:saved.viz||null,eq:(saved.eq&&saved.eq.length===5)?saved.eq:DEFAULT_EQ.slice(),eqPreset:saved.eqPreset||'Default',
       theme:saved.theme||'adapt',barOpen:saved.barOpen===undefined?true:!!saved.barOpen,
       // status + session
       status:'Connecting…',error:null,clock:new Date(),listen:0,played:0
@@ -187,7 +202,7 @@ class Dashboard extends React.Component {
   // --- utilities ------------------------------------------------------------
   hexA(h,a){const n=parseInt(h.slice(1),16);return 'rgba('+(n>>16&255)+','+(n>>8&255)+','+(n&255)+','+a+')';}
   fmt(s){s=Math.max(0,Math.floor(s));return Math.floor(s/60)+':'+String(s%60).padStart(2,'0');}
-  save(){try{localStorage.setItem('wax-dash',JSON.stringify({w:this.state.w,viz:this.state.viz,theme:this.state.theme,barOpen:this.state.barOpen}));}catch(e){}}
+  save(){try{localStorage.setItem('wax-dash',JSON.stringify({w:this.state.w,viz:this.state.viz,theme:this.state.theme,barOpen:this.state.barOpen,eq:this.state.eq,eqPreset:this.state.eqPreset}));}catch(e){}}
   accent(){return this.state.theme==='adapt'?(this.state.artColor||'#4fd8c0'):this.state.theme;}
   vizMode(){return this.state.viz||'bars';}
   greyIf(on){return on?this.accent():'rgba(255,255,255,.42)';}
@@ -267,12 +282,13 @@ class Dashboard extends React.Component {
   async refreshPlaylists(){try{const p=await api('/me/playlists?limit=20');if(p&&p.items)
     this.setState({playlists:p.items.filter(Boolean).map(pl=>({id:pl.id,uri:pl.uri,name:pl.name,
       count:pl.tracks?pl.tracks.total:0,owner:pl.owner?pl.owner.display_name:'',
-      artUrl:pl.images&&pl.images[0]?pl.images[0].url:''}))});}catch(e){}}
+      artUrl:pl.images&&pl.images.length?pl.images[pl.images.length-1].url:''}))});}catch(e){}}
   async refreshTop(){
     try{const t=await api('/me/top/tracks?limit=8&time_range=short_term');if(t&&t.items)this.setState({topTracks:t.items.map(mapTrack)});}catch(e){}
     try{const a=await api('/me/top/artists?limit=1&time_range=short_term');if(a&&a.items&&a.items[0])this.setState({topArtist:a.items[0].name});}catch(e){}}
   async refreshLiked(id){if(!id){this.setState({liked:false});return;}
-    try{const r=await api('/me/tracks/contains?ids='+id);this.setState({liked:Array.isArray(r)&&!!r[0]});}catch(e){}}
+    try{const r=await api('/me/tracks/contains?ids='+id);
+      if(this.state.track&&this.state.track.id===id)this.setState({liked:Array.isArray(r)&&!!r[0]});}catch(e){}}
 
   // --- playback controls ----------------------------------------------------
   toggle=()=>{if(this.player)this.player.togglePlay();};
@@ -285,7 +301,14 @@ class Dashboard extends React.Component {
   repeatT=async()=>{const modes=['off','context','track'];const nx=(this.state.repeat+1)%3;this.setState({repeat:nx});
     try{await api('/me/player/repeat?state='+modes[nx],{method:'PUT'});}catch(e){}};
   likeT=async()=>{const id=this.state.track&&this.state.track.id;if(!id)return;const nl=!this.state.liked;this.setState({liked:nl});
-    try{await api('/me/tracks?ids='+id,{method:nl?'PUT':'DELETE'});}catch(e){this.setState({liked:!nl});}};
+    try{await api('/me/tracks',{method:nl?'PUT':'DELETE',body:{ids:[id]}});}
+    catch(e){if(this.state.track&&this.state.track.id===id)this.setState({liked:!nl});
+      this.setState({error:'Could not '+(nl?'save':'remove')+' this track ('+(e.status||e.message)+')'});}};
+  eqPick(name,vals){this.setState({eq:vals.slice(),eqPreset:name},()=>this.save());}
+  eqReset=()=>this.setState({eq:DEFAULT_EQ.slice(),eqPreset:'Default'},()=>this.save());
+  eqDown(i,e){this.barDrag(e,(fx,fy)=>this.setState(st=>{const eq=st.eq.slice();eq[i]=fy;return{eq};}));
+    const up=()=>{window.removeEventListener('pointerup',up);this.setState({eqPreset:'Custom'},()=>this.save());};
+    window.addEventListener('pointerup',up);}
   play(body){const q=this.deviceId?('?device_id='+this.deviceId):'';
     return api('/me/player/play'+q,{method:'PUT',body}).catch(e=>this.setState({error:'Playback failed ('+(e.status||e.message)+')'}));}
   playContext(uri,pi){this.setState({activePl:pi==null?this.state.activePl:pi});this.play({context_uri:uri});}
@@ -383,21 +406,23 @@ class Dashboard extends React.Component {
       vizRef:this.vizRef,lyrRef:this.lyrRef,
       vizChips:['bars','wave','ring','blob'].map(n=>({name:n.toUpperCase(),pick:()=>this.setState({viz:n},()=>this.save()),
         bg:this.vizMode()===n?this.hexA(ac,.16):'transparent',bd:this.vizMode()===n?this.hexA(ac,.55):'rgba(255,255,255,.14)',fg:this.vizMode()===n?ac:'rgba(255,255,255,.5)'})),
-      queueItems:s.queue.map(q=>({title:q.title,artist:q.artist,dur:this.fmt(q.dur),artUrl:q.artUrl,go:()=>this.playUris([q.uri])})),
+      queueItems:s.queue.map(q=>({title:q.title,artist:q.artist,dur:this.fmt(q.dur),artUrl:q.artThumb,go:()=>this.playUris([q.uri])})),
       playlists:s.playlists.map((p,pi)=>({name:p.name,count:p.count,owner:p.owner,artUrl:p.artUrl,
         fg:s.activePl===pi?ac:'#ffffff',play:()=>this.playContext(p.uri,pi)})),
       eqBands:s.eq.map((v,i)=>({h:(8+v*92)+'%',label:['60','250','1K','4K','12K'][i],
         bg:'linear-gradient(180deg,'+this.hexA(ac,.9)+','+this.hexA(ac,.3)+')',
-        down:(e)=>this.barDrag(e,(fx,fy)=>this.setState(st=>{const eq=st.eq.slice();eq[i]=fy;return{eq};}))})),
+        down:(e)=>this.eqDown(i,e)})),
+      eqPresets:EQ_PRESETS.map(p=>({name:p[0],active:s.eqPreset===p[0],pick:()=>this.eqPick(p[0],p[1])})),
+      eqReset:this.eqReset,
       devices:s.devices.map(dv=>({name:dv.name,type:(dv.type||'').toUpperCase(),pick:()=>this.transfer(dv.id,true),
         dot:dv.is_active?ac:'rgba(255,255,255,.18)',fg:dv.is_active?'#ffffff':'rgba(255,255,255,.6)'})),
-      recs:s.topTracks.slice(0,2).map(r=>({title:r.title,artist:r.artist,artUrl:r.artUrl,
+      recs:s.topTracks.slice(0,2).map(r=>({title:r.title,artist:r.artist,artUrl:r.artThumb,
         bd:this.hexA(ac,.45),fg:ac,add:()=>this.addQueue(r.uri)})),
       statMin:Math.floor(s.listen/60),statTracks:s.played,statTop:s.topArtist||(tk?tk.artist:'—'),
       clockTime:pad(hr)+':'+pad(d.getMinutes()),
       clockDate:d.toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'}),
       greeting:hr<5?'LATE NIGHT':hr<12?'GOOD MORNING':hr<18?'GOOD AFTERNOON':'GOOD EVENING',
-      hist:s.recent.map(h=>({title:h.title,artUrl:h.artUrl}))
+      hist:s.recent.map(h=>({title:h.title,artUrl:h.artThumb}))
     };
   }
 
@@ -563,16 +588,22 @@ class Dashboard extends React.Component {
                 <span style={css("color:rgba(255,255,255,.22);font-size:12px")}>{"⠿"}</span>
               </span>
             </div>
-            <div onPointerDown={v.volDown} style={css("height:16px;display:flex;align-items:center;cursor:pointer;margin:0 16px;touch-action:none")}>
+            <div onPointerDown={v.volDown} style={css("height:16px;display:flex;align-items:center;cursor:pointer;margin:4px 16px 0;touch-action:none")}>
               <div style={css("position:relative;height:4px;border-radius:2px;background:rgba(255,255,255,.12);width:100%")}>
                 <div style={css(`position:absolute;top:0;bottom:0;left:0;border-radius:2px;width:${v.volPct};background:${v.accent}`)}></div>
               </div>
             </div>
-            <div style={css("flex:1;min-height:0;display:flex;gap:8px;padding:4px 16px 12px")}>
+            <div style={css("display:flex;align-items:center;gap:5px;padding:8px 14px 2px;overflow-x:auto")}>
+              <button onClick={v.eqReset} title="Reset EQ" className="hb6" style={css("flex:none;font-size:12px;line-height:1;padding:4px 8px;border-radius:20px;cursor:pointer;border:1px solid rgba(255,255,255,.14);background:transparent;color:rgba(255,255,255,.55)")}>↺</button>
+              {v.eqPresets.map((p,i)=>(
+                <button key={i} onClick={p.pick} style={css(`flex:none;font:600 8.5px ui-monospace,Menlo,monospace;letter-spacing:.06em;padding:4px 9px;border-radius:20px;cursor:pointer;border:1px solid ${p.active?this.hexA(v.accent,.55):'rgba(255,255,255,.14)'};background:${p.active?this.hexA(v.accent,.16):'transparent'};color:${p.active?v.accent:'rgba(255,255,255,.5)'}`)}>{p.name.toUpperCase()}</button>
+              ))}
+            </div>
+            <div style={css("flex:1;min-height:0;display:flex;gap:8px;padding:2px 16px 12px")}>
               {v.eqBands.map((b,i)=>(
                 <div key={i} onPointerDown={b.down} style={css("flex:1;display:flex;flex-direction:column;gap:4px;cursor:ns-resize;min-width:0;touch-action:none")}>
                   <div style={css("flex:1;position:relative;border-radius:4px;background:rgba(255,255,255,.06);overflow:hidden")}>
-                    <div style={css(`position:absolute;left:0;right:0;bottom:0;height:${b.h};background:${b.bg}`)}></div>
+                    <div style={css(`position:absolute;left:0;right:0;bottom:0;height:${b.h};background:${b.bg};transition:height .18s ease-out`)}></div>
                   </div>
                   <div style={css("font:9px ui-monospace,Menlo,monospace;color:rgba(255,255,255,.35);text-align:center")}>{b.label}</div>
                 </div>
@@ -672,7 +703,11 @@ function Connect({error}){
         <div style={css("font:600 10px ui-monospace,Menlo,monospace;letter-spacing:.16em;color:rgba(255,255,255,.4);margin-top:4px")}>SESSION DASHBOARD · SPOTIFY</div>
         <p style={css("font-size:13.5px;line-height:1.6;color:rgba(255,255,255,.6);margin:22px 0 20px")}>Connect your Spotify Premium account to control playback, browse your playlists, and drive the dashboard with live data. Audio plays right in this tab.</p>
         {error&&<div style={css("font-size:12px;color:#ff9d9d;background:rgba(240,90,90,.12);border:1px solid rgba(240,90,90,.3);border-radius:10px;padding:9px 12px;margin-bottom:16px")}>{error}</div>}
-        {CONFIGURED?(
+        {!SERVED_OK?(
+          <div style={css("font-size:12.5px;line-height:1.7;color:rgba(255,255,255,.72);background:rgba(240,180,90,.1);border:1px solid rgba(240,180,90,.35);border-radius:12px;padding:14px 16px")}>
+            <b style={css("color:#ffd79a")}>Open this over a local server, not a file.</b> You loaded it from <code style={css("color:#ffd79a;word-break:break-all")}>{location.href}</code>. Spotify rejects <code>file://</code> logins. Run <code style={css("color:#7fd0bf")}>python -m http.server 5173 --bind 127.0.0.1</code> in the project folder, then open <a href={SERVE_URL} style={css("color:#7fd0bf")}>{SERVE_URL}</a>.
+          </div>
+        ):CONFIGURED?(
           <button onClick={beginAuth} className="spgreen" style={css("width:100%;border:none;border-radius:24px;padding:14px;background:#1db954;color:#04120a;font-size:14px;font-weight:700;letter-spacing:.02em;cursor:pointer;transition:transform .15s,background .15s")}>Connect Spotify</button>
         ):(
           <div style={css("font-size:12.5px;line-height:1.7;color:rgba(255,255,255,.6);background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:14px 16px")}>
