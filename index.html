@@ -228,7 +228,7 @@ class Dashboard extends React.Component {
     whenSdkReady().then(()=>this.initPlayer()).catch(e=>this.setState({error:String(e.message||e)}));
     this._clk=setInterval(()=>this.setState({clock:new Date()}),1000);
     this._tick=setInterval(()=>{if(!this.state.playing)return;
-      this.setState(s=>({posMs:Math.min(s.durMs||s.posMs,s.posMs+500),listen:s.listen+.5}));},500);
+      this.setState(s=>({posMs:Math.min(s.durMs||s.posMs,s.posMs+250),listen:s.listen+.25}));},250);
     this._sync=setInterval(()=>{if(this.player)this.player.getCurrentState().then(st=>{if(st)this.applyState(st);});},4000);
     this._poll=setInterval(()=>{this.refreshDevices();this.refreshQueue();},8000);
     this._reci=setInterval(()=>this.refreshRecent(),30000);
@@ -245,8 +245,8 @@ class Dashboard extends React.Component {
     window.removeEventListener('resize',this._onResize);
     if(this.player)this.player.disconnect();}
   componentDidUpdate(){const a=this.actLine();
-    if(a!==this._lastA){this._lastA=a;const el=this.lyrRef.current;
-      if(el&&a>=0&&el.children[a])el.scrollTop=el.children[a].offsetTop-el.clientHeight/2+14;}
+    if(a!==this._lastA){this._lastA=a;const el=this.lyrRef.current,ch=el&&a>=0&&el.children[a];
+      if(ch)el.scrollTo({top:ch.offsetTop-el.clientHeight/2+ch.offsetHeight/2,behavior:'smooth'});}
     this.measureGrid();}
   // columns shrink on narrower/portrait screens; rows stretch to fill height
   cols(){const vw=this.state.vw;return vw>=1180?4:vw>=860?3:vw>=560?2:1;}
@@ -467,8 +467,11 @@ class Dashboard extends React.Component {
       lyrState:s.lyricsState,plainLyrics:s.lyricsPlain||[],
       lines:(s.lyricsState==='synced'&&s.lyrics)?s.lyrics.map((ln,i)=>({text:ln.text||'♪',
         go:()=>{const ms=ln.t*1000;this.setState({posMs:ms});if(this.player)this.player.seek(ms);},
-        st:{padding:'6px 0',fontSize:'15.5px',lineHeight:'1.4',cursor:'pointer',transition:'color .35s',
-          fontWeight:i===act?600:400,color:i===act?'#ffffff':(i<act?'rgba(255,255,255,.28)':'rgba(255,255,255,.48)')}})):[],
+        st:{padding:'6px 0',fontSize:'15.5px',lineHeight:'1.4',cursor:'pointer',transformOrigin:'left center',
+          transition:'color .6s ease, transform .6s cubic-bezier(.22,.61,.36,1), text-shadow .6s ease',
+          fontWeight:i===act?600:400,transform:i===act?'scale(1.035)':'scale(1)',
+          color:i===act?'#ffffff':(i<act?'rgba(255,255,255,.26)':'rgba(255,255,255,.5)'),
+          textShadow:i===act?'0 0 22px '+this.hexA(ac,.35):'0 0 0 rgba(0,0,0,0)'}})):[],
       vizChips:['bars','wave','ring','blob'].map(n=>({name:n.toUpperCase(),pick:()=>this.setState({viz:n},()=>this.save()),
         bg:this.vizMode()===n?this.hexA(ac,.16):'transparent',bd:this.vizMode()===n?this.hexA(ac,.55):'rgba(255,255,255,.14)',fg:this.vizMode()===n?ac:'rgba(255,255,255,.5)'})),
       queueItems:s.queue.map(q=>({title:q.title,artist:q.artist,dur:this.fmt(q.dur),artUrl:q.artThumb,go:()=>this.playUris([q.uri])})),
