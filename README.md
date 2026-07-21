@@ -36,15 +36,29 @@ backend and no client secret.
 
 ## Quick start
 
-### 1. Serve it over `127.0.0.1`
-Spotify rejects `file://` redirect URIs, so run a static server:
+### 1. Run the dev server
+Spotify rejects `file://` redirect URIs, so serve over `127.0.0.1`. Use the bundled
+[`serve.py`](serve.py) (Python stdlib only) — it serves the app **and** proxies the Fun Facts
+widget to Groq:
 
 ```bash
-python -m http.server 5173 --bind 127.0.0.1
-# or:  npx http-server -a 127.0.0.1 -p 5173
+python serve.py        # http://127.0.0.1:5173
 ```
 
-Then open **http://127.0.0.1:5173/index.html**.
+Then open **http://127.0.0.1:5173/index.html**. (A plain static server like
+`python -m http.server 5173 --bind 127.0.0.1` also works — everything except Fun Facts.)
+
+### Fun Facts (optional, Groq)
+The Fun Facts widget calls an LLM via a tiny server-side proxy so the API key never reaches the
+browser. Create a **`config.json`** next to `serve.py`:
+
+```json
+{ "API_KEY_GROQ_LLAMA": "your-groq-key", "GROQ_MODEL": "llama-3.3-70b-versatile" }
+```
+
+`config.json` is **gitignored** (the key stays on your machine and is never served over HTTP or
+committed). Restart `serve.py` after editing it. Without a key, the rest of the app works fine and
+the widget just says facts are unavailable.
 
 ### 2. Use your own Spotify app (if cloning)
 This repo ships with a Client ID wired for its owner's Spotify app. To run it under your own:
@@ -73,6 +87,7 @@ or pick a playlist to start audio in the tab.
 | Session · Top Artist | `GET /me/top/artists` |
 | Recently Played | `GET /me/player/recently-played` |
 | Lyrics (time-synced, click-to-seek) | [LRCLIB](https://lrclib.net) — free, keyless, CORS |
+| Fun Facts | [Groq](https://groq.com) LLM via the `serve.py` proxy (key stays server-side) |
 | "Adapt to art" theme | dominant color sampled from album art on a canvas |
 
 ## Known Spotify limits (handled gracefully)

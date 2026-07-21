@@ -189,7 +189,8 @@ class Dashboard extends React.Component {
       {id:'recs',name:'Suggestions',span:[2,1]},
       {id:'stats',name:'Session Stats',span:[1,1]},
       {id:'clock',name:'Clock',span:[1,1]},
-      {id:'hist',name:'Recently Played',span:[2,1],alt:[4,1]}
+      {id:'hist',name:'Recently Played',span:[2,1],alt:[4,1]},
+      {id:'facts',name:'Fun Facts',span:[2,1]}
     ];
     this.themes=[{name:'Adapt to art',key:'adapt'},{name:'Teal',key:'#4fd8c0'},{name:'Ember',key:'#f0956b'},{name:'Cobalt',key:'#7d9bef'},{name:'Lime',key:'#9ed36a'},{name:'Orchid',key:'#d97fd0'},{name:'Gold',key:'#f2c95c'}];
     this.vizRef=React.createRef(); this.lyrRef=React.createRef(); this.gridRef=React.createRef();
@@ -204,6 +205,8 @@ class Dashboard extends React.Component {
       devices:[],queue:[],playlists:[],recent:[],topTracks:[],topArtist:'',
       // lyrics (LRCLIB)
       lyrics:null,lyricsPlain:null,lyricsState:'none',lyricsFor:null,
+      // fun facts (Groq via serve.py proxy)
+      fact:null,factState:'none',factMsg:'',factFor:null,
       // ui
       w,fs:null,menuOpen:false,themeOpen:false,activePl:null,
       viz:saved.viz||null,eq:(saved.eq&&saved.eq.length===5)?saved.eq:DEFAULT_EQ.slice(),eqPreset:saved.eqPreset||'Default',
@@ -213,7 +216,7 @@ class Dashboard extends React.Component {
       // responsive layout
       vw:window.innerWidth,gridH:null
     };
-    this.deviceId=null; this._lastTrackId=null; this._lyrCache={};
+    this.deviceId=null; this._lastTrackId=null; this._lyrCache={}; this._factCache={};
   }
   // --- utilities ------------------------------------------------------------
   hexA(h,a){const n=parseInt(h.slice(1),16);return 'rgba('+(n>>16&255)+','+(n>>8&255)+','+(n&255)+','+a+')';}
@@ -282,8 +285,24 @@ class Dashboard extends React.Component {
       shuffle:!!st.shuffle,repeat:st.repeat_mode|0,
       played:(prev&&prev!==t.id)?s.played+1:s.played}));
     if(prev!==t.id){this._lastTrackId=t.id;this.refreshLiked(t.id);this.refreshQueue();
-      this.extractColor(t.artUrl);this.fetchLyrics(t);}
+      this.extractColor(t.artUrl);this.fetchLyrics(t);this.fetchFact(t);}
   }
+  // Fetch an AI fun fact from Groq via the same-origin serve.py proxy.
+  async fetchFact(track,force){
+    if(!track){this.setState({fact:null,factState:'none',factFor:null});return;}
+    const id=track.id,tag=id+(force?':'+Date.now():'');this._factReq=tag;
+    if(!force&&this._factCache[id]){this.setState({fact:this._factCache[id],factState:'ok',factFor:id});return;}
+    this.setState({factState:'loading',factFor:id,fact:force?this.state.fact:null});
+    try{
+      const p=new URLSearchParams({title:track.title,artist:track.artist,album:track.album||'',n:String(Date.now())});
+      const r=await fetch('/api/funfact?'+p.toString());
+      const j=await r.json().catch(()=>({}));
+      if(this._factReq!==tag)return;
+      if(r.ok&&j.fact){this._factCache[id]=j.fact;this.setState({fact:j.fact,factState:'ok',factFor:id});}
+      else this.setState({factState:'error',factMsg:j.error||'Fun facts unavailable',factFor:id});
+    }catch(e){if(this._factReq===tag)this.setState({factState:'error',factMsg:'Run the app with serve.py to enable fun facts',factFor:id});}
+  }
+  factRefresh=()=>this.fetchFact(this.state.track,true);
   // Fetch synced/plain lyrics from LRCLIB (free, no key, CORS-enabled).
   async fetchLyrics(track){
     if(!track){this.setState({lyrics:null,lyricsPlain:null,lyricsState:'none',lyricsFor:null});return;}
@@ -448,7 +467,8 @@ class Dashboard extends React.Component {
       dragStart:this.dragStart,dragOver:this.dragOver,dragLeave:this.dragLeave,drop:this.drop,
       fsClick:this.fsClick,rmClick:this.rmClick,szClick:this.szClick,
       layNow:this.lay('now'),layViz:this.lay('viz'),layLyrics:this.lay('lyrics'),layQueue:this.lay('queue'),layPl:this.lay('pl'),
-      layEq:this.lay('eq'),layDev:this.lay('dev'),layRecs:this.lay('recs'),layStats:this.lay('stats'),layClock:this.lay('clock'),layHist:this.lay('hist'),
+      layEq:this.lay('eq'),layDev:this.lay('dev'),layRecs:this.lay('recs'),layStats:this.lay('stats'),layClock:this.lay('clock'),layHist:this.lay('hist'),layFacts:this.lay('facts'),
+      factState:s.factState,fact:s.fact,factMsg:s.factMsg,factRefresh:this.factRefresh,
       histWrap:(s.fs==='hist'||s.w.hist.big)?'wrap':'nowrap',
       logoGrad:'linear-gradient(135deg,'+ac+' 10%,#ffffff 60%,'+this.hexA(ac,.55)+')',
       barSt:s.barOpen?'max-height:48px;opacity:1;margin-bottom:12px':'max-height:0;opacity:0;margin-top:0;margin-bottom:0;overflow:hidden;pointer-events:none',
@@ -760,6 +780,33 @@ class Dashboard extends React.Component {
                   <div style={css("font-size:9.5px;color:rgba(255,255,255,.5);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{h.title}</div>
                 </div>
               ))}
+            </div>
+          </>)}
+
+          {/* FUN FACTS (AI, Groq via serve.py) */}
+          {this.card(v,'facts',v.layFacts,<>
+            <div draggable="true" data-wid="facts" onDragStart={v.dragStart} style={css("display:flex;align-items:center;gap:8px;padding:10px 14px 4px;cursor:grab;user-select:none")}>
+              <span style={css("font:600 10px ui-monospace,Menlo,monospace;letter-spacing:.16em;color:rgba(255,255,255,.4)")}>FUN FACT</span>
+              <span style={css("margin-left:auto;display:flex;gap:2px;align-items:center")}>
+                {this.ic('facts',v.factRefresh,"Another fact","↻")}
+                {this.ic('facts',v.fsClick,"Fullscreen","⤢")}{this.ic('facts',v.rmClick,"Remove","✕")}
+                <span style={css("color:rgba(255,255,255,.22);font-size:12px")}>{"⠿"}</span>
+              </span>
+            </div>
+            <div style={css("flex:1;min-height:0;display:flex;flex-direction:column;justify-content:center;gap:8px;padding:4px 18px 14px;overflow-y:auto")}>
+              {v.factState==='loading'?(
+                <div style={css("display:flex;align-items:center;gap:9px;color:rgba(255,255,255,.5);font-size:13px")}>
+                  <span style={css("width:15px;height:15px;border-radius:50%;border:2px solid rgba(255,255,255,.2);border-top-color:#fff;display:inline-block;animation:spin .7s linear infinite")}></span>
+                  Digging up a fact…
+                </div>
+              ):v.factState==='ok'?(<>
+                <div style={css("font-size:15px;line-height:1.5;color:rgba(255,255,255,.82)")}>
+                  <span style={css(`color:${v.accent};font-weight:700;margin-right:7px`)}>✦</span>{v.fact}
+                </div>
+                <div style={css("font:9px ui-monospace,Menlo,monospace;letter-spacing:.1em;color:rgba(255,255,255,.25)")}>AI-GENERATED · GROQ · MAY VARY</div>
+              </>):(
+                <div style={css("font-size:12.5px;line-height:1.5;color:rgba(255,255,255,.4)")}>{v.factState==='error'?v.factMsg:'Play a track to get a fun fact.'}</div>
+              )}
             </div>
           </>)}
 
