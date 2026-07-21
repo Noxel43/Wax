@@ -86,7 +86,13 @@ class Handler(SimpleHTTPRequestHandler):
         req = urllib.request.Request(
             GROQ_URL,
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Authorization": "Bearer " + GROQ_KEY, "Content-Type": "application/json"},
+            headers={
+                "Authorization": "Bearer " + GROQ_KEY,
+                "Content-Type": "application/json",
+                # Groq is behind Cloudflare, which blocks urllib's default
+                # User-Agent (error 1010). Send a normal browser UA.
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+            },
         )
         try:
             with urllib.request.urlopen(req, timeout=25) as resp:
