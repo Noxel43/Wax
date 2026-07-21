@@ -1,2 +1,5 @@
 # Local Claude Code settings (machine-specific)
 .claude/settings.local.json
+
+# Local secrets — holds the Groq API key; never commit
+config.json
