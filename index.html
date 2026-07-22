@@ -211,7 +211,8 @@ class Dashboard extends React.Component {
       {id:'stats',name:'Session Stats',span:[1,1]},
       {id:'clock',name:'Clock',span:[1,1]},
       {id:'hist',name:'Recently Played',span:[2,1],alt:[4,1]},
-      {id:'facts',name:'Fun Facts',span:[2,1]}
+      {id:'facts',name:'Fun Facts',span:[2,1]},
+      {id:'search',name:'Search',span:[1,2],alt:[2,2]}
     ];
     this.themes=[{name:'Adapt to art',key:'adapt'},{name:'Teal',key:'#4fd8c0'},{name:'Ember',key:'#f0956b'},{name:'Cobalt',key:'#7d9bef'},{name:'Lime',key:'#9ed36a'},{name:'Orchid',key:'#d97fd0'},{name:'Gold',key:'#f2c95c'}];
     this.vizRef=React.createRef(); this.lyrRef=React.createRef(); this.gridRef=React.createRef();
@@ -228,6 +229,8 @@ class Dashboard extends React.Component {
       lyrics:null,lyricsPlain:null,lyricsState:'none',lyricsFor:null,
       // fun facts (Groq via serve.py proxy)
       fact:null,factState:'none',factMsg:'',factFor:null,
+      // search
+      q:'',searchType:'track',results:[],searching:false,
       // ui
       w,fs:null,menuOpen:false,themeOpen:false,activePl:null,
       viz:saved.viz||null,eq:(saved.eq&&saved.eq.length===5)?saved.eq:DEFAULT_EQ.slice(),eqPreset:saved.eqPreset||'Default',
@@ -269,6 +272,7 @@ class Dashboard extends React.Component {
   componentWillUnmount(){[this._clk,this._tick,this._sync,this._poll,this._reci].forEach(clearInterval);
     cancelAnimationFrame(this._raf);window.removeEventListener('keydown',this._esc);
     window.removeEventListener('resize',this._onResize);
+    clearTimeout(this._searchT);
     this.stopLive();
     if(this.player)this.player.disconnect();}
   componentDidUpdate(){const a=this.actLine();
@@ -327,6 +331,39 @@ class Dashboard extends React.Component {
     }catch(e){if(this._factReq===tag)this.setState({factState:'error',factMsg:'Run the app with serve.py to enable fun facts',factFor:id});}
   }
   factRefresh=()=>this.fetchFact(this.state.track,true);
+  // --- search -----------------------------------------------------------------
+  onSearchInput=(e)=>{const q=e.target.value;this.setState({q});
+    clearTimeout(this._searchT);
+    if(!q.trim()){this._searchReq=null;this.setState({results:[],searching:false});return;}
+    this._searchT=setTimeout(()=>this.runSearch(q),350);};
+  onSearchKey=(e)=>{if(e.key==='Enter'){clearTimeout(this._searchT);
+    if(this.state.q.trim())this.runSearch(this.state.q);}};
+  clearSearch=()=>{clearTimeout(this._searchT);this._searchReq=null;
+    this.setState({q:'',results:[],searching:false});};
+  setSearchType=(t)=>this.setState({searchType:t,results:[]},()=>{
+    if(this.state.q.trim())this.runSearch(this.state.q);});
+  async runSearch(q){
+    const type=this.state.searchType,tag=q+'|'+type;this._searchReq=tag;
+    this.setState({searching:true});
+    try{
+      const r=await api('/search?'+new URLSearchParams({q:q,type:type,limit:'20'}).toString());
+      if(this._searchReq!==tag)return;
+      const items=(r&&r[type+'s']&&r[type+'s'].items)||[];
+      this.setState({results:items.filter(Boolean).map(it=>this.mapResult(it,type)),searching:false});
+    }catch(e){if(this._searchReq===tag)
+      this.setState({searching:false,error:'Search failed ('+(e.status||e.message)+')'});}
+  }
+  mapResult(it,type){
+    const imgs=(it.album&&it.album.images)||it.images||[];
+    const art=imgs.length?imgs[imgs.length-1].url:'';
+    const by=(it.artists||[]).map(a=>a.name).join(', ');
+    if(type==='track')return{id:it.id,uri:it.uri,kind:'track',title:it.name,sub:by,meta:this.fmt(Math.round((it.duration_ms||0)/1000)),art};
+    if(type==='album')return{id:it.id,uri:it.uri,kind:'album',title:it.name,sub:by,meta:(it.release_date||'').slice(0,4),art};
+    if(type==='artist')return{id:it.id,uri:it.uri,kind:'artist',title:it.name,sub:'Artist',meta:'',art};
+    return{id:it.id,uri:it.uri,kind:'playlist',title:it.name,sub:it.owner&&it.owner.display_name?it.owner.display_name:'Playlist',
+      meta:it.tracks?it.tracks.total+' tr':'',art};
+  }
+  searchPlay(r){if(r.kind==='track')this.playUris([r.uri]);else this.playContext(r.uri);}
   // Fetch synced/plain lyrics from LRCLIB (free, no key, CORS-enabled).
   async fetchLyrics(track){
     if(!track){this.setState({lyrics:null,lyricsPlain:null,lyricsState:'none',lyricsFor:null});return;}
@@ -550,6 +587,13 @@ class Dashboard extends React.Component {
       layNow:this.lay('now'),layViz:this.lay('viz'),layLyrics:this.lay('lyrics'),layQueue:this.lay('queue'),layPl:this.lay('pl'),
       layEq:this.lay('eq'),layDev:this.lay('dev'),layRecs:this.lay('recs'),layStats:this.lay('stats'),layClock:this.lay('clock'),layHist:this.lay('hist'),layFacts:this.lay('facts'),
       factState:s.factState,fact:s.fact,factMsg:s.factMsg,factRefresh:this.factRefresh,
+      laySearch:this.lay('search'),q:s.q,searching:s.searching,
+      onSearchInput:this.onSearchInput,onSearchKey:this.onSearchKey,clearSearch:this.clearSearch,
+      searchTypes:['track','album','artist','playlist'].map(t=>({name:t.toUpperCase()+'S',
+        active:s.searchType===t,pick:()=>this.setSearchType(t)})),
+      results:s.results.map(r=>Object.assign({},r,{
+        play:()=>this.searchPlay(r),
+        queue:(e)=>{e.stopPropagation();this.addQueue(r.uri);}})),
       histWrap:(s.fs==='hist'||s.w.hist.big)?'wrap':'nowrap',
       logoGrad:'linear-gradient(135deg,'+ac+' 10%,#ffffff 60%,'+this.hexA(ac,.55)+')',
       barSt:s.barOpen?'max-height:48px;opacity:1;margin-bottom:12px':'max-height:0;opacity:0;margin-top:0;margin-bottom:0;overflow:hidden;pointer-events:none',
@@ -873,6 +917,44 @@ class Dashboard extends React.Component {
                   <div style={css("font-size:9.5px;color:rgba(255,255,255,.5);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{h.title}</div>
                 </div>
               ))}
+            </div>
+          </>)}
+
+          {/* SEARCH */}
+          {this.card(v,'search',v.laySearch,<>
+            {this.head(v,'search','SEARCH','10px 14px 6px',true)}
+            <div style={css("padding:0 14px 8px;display:flex;flex-direction:column;gap:7px")}>
+              <div style={css("display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:10px;padding:7px 10px")}>
+                <svg width="12" height="12" viewBox="0 0 16 16" style={css("flex:none;opacity:.45")}><circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" strokeWidth="1.6"></circle><path d="M11 11l4 4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"></path></svg>
+                <input value={v.q} onChange={v.onSearchInput} onKeyDown={v.onSearchKey} placeholder="Search Spotify…"
+                  style={css("flex:1;min-width:0;background:transparent;border:none;outline:none;color:#ececf1;font-size:13px;font-family:inherit")}/>
+                {v.q&&<button onClick={v.clearSearch} title="Clear" className="hw" style={css("flex:none;border:none;background:transparent;cursor:pointer;padding:0 2px;color:rgba(255,255,255,.4);font-size:11px;line-height:1")}>✕</button>}
+              </div>
+              <div style={css("display:flex;gap:5px;overflow-x:auto")}>
+                {v.searchTypes.map((t,i)=>(
+                  <button key={i} onClick={t.pick} style={css(`flex:none;font:600 8.5px ui-monospace,Menlo,monospace;letter-spacing:.06em;padding:4px 9px;border-radius:20px;cursor:pointer;border:1px solid ${t.active?this.hexA(v.accent,.55):'rgba(255,255,255,.14)'};background:${t.active?this.hexA(v.accent,.16):'transparent'};color:${t.active?v.accent:'rgba(255,255,255,.5)'}`)}>{t.name}</button>
+                ))}
+              </div>
+            </div>
+            <div style={css("flex:1;min-height:0;overflow-y:auto;padding:0 0 10px")}>
+              {v.searching?(
+                <div style={css("display:flex;align-items:center;gap:9px;padding:12px 16px;color:rgba(255,255,255,.5);font-size:12.5px")}>
+                  <span style={css("width:14px;height:14px;border-radius:50%;border:2px solid rgba(255,255,255,.2);border-top-color:#fff;display:inline-block;animation:spin .7s linear infinite")}></span>
+                  Searching…
+                </div>
+              ):v.results.length?v.results.map((r,i)=>(
+                <div key={r.id+'-'+i} onClick={r.play} title={r.kind==='track'?'Play now':'Play'} className="hb5" style={css("display:flex;align-items:center;gap:10px;padding:7px 14px;cursor:pointer")}>
+                  <div style={css(`width:34px;height:34px;border-radius:${r.kind==='artist'?'50%':'7px'};flex:none;${artCss(r.art)}`)}></div>
+                  <div style={css("min-width:0;flex:1")}>
+                    <div style={css("font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{r.title}</div>
+                    <div style={css("font-size:10.5px;color:rgba(255,255,255,.5);white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{r.sub}</div>
+                  </div>
+                  {r.meta&&<div style={css("flex:none;font:9.5px ui-monospace,Menlo,monospace;color:rgba(255,255,255,.35)")}>{r.meta}</div>}
+                  {r.kind==='track'&&<button onClick={r.queue} title="Add to queue" className="hw" style={css("flex:none;border:none;background:transparent;cursor:pointer;padding:2px 4px;color:rgba(255,255,255,.4);font-size:15px;line-height:1")}>+</button>}
+                </div>
+              )):(
+                <div style={css("padding:12px 16px;font-size:12px;line-height:1.5;color:rgba(255,255,255,.35)")}>{v.q.trim()?'No results.':'Search tracks, albums, artists or playlists — then click to play.'}</div>
+              )}
             </div>
           </>)}
 
