@@ -223,7 +223,9 @@ class Dashboard extends React.Component {
       // status + session
       status:'Connecting…',error:null,clock:new Date(),listen:0,played:0,
       // responsive layout
-      vw:window.innerWidth,gridH:null
+      vw:window.innerWidth,gridH:null,
+      // live audio capture for the visualizer
+      liveAudio:false
     };
     this.deviceId=null; this._lastTrackId=null; this._lyrCache={}; this._factCache={};
   }
@@ -255,6 +257,7 @@ class Dashboard extends React.Component {
   componentWillUnmount(){[this._clk,this._tick,this._sync,this._poll,this._reci].forEach(clearInterval);
     cancelAnimationFrame(this._raf);window.removeEventListener('keydown',this._esc);
     window.removeEventListener('resize',this._onResize);
+    this.stopLive();
     if(this.player)this.player.disconnect();}
   componentDidUpdate(){const a=this.actLine();
     if(a!==this._lastA){this._lastA=a;const el=this.lyrRef.current,ch=el&&a>=0&&el.children[a];
@@ -429,15 +432,69 @@ class Dashboard extends React.Component {
     const t=this.state.posMs/1000;if(t<L[0].t)return -1;
     let a=0;for(let i=0;i<L.length;i++)if(t>=L[i].t)a=i;return a;}
   rr(x,a,b,w,h,r){r=Math.min(r,w/2,h/2);x.beginPath();x.moveTo(a+r,b);x.arcTo(a+w,b,a+w,b+h,r);x.arcTo(a+w,b+h,a,b+h,r);x.arcTo(a,b+h,a,b,r);x.arcTo(a,b,a+w,b,r);x.closePath();x.fill();}
+  // --- live audio capture -----------------------------------------------------
+  // Spotify's SDK audio is DRM-protected, so it can't be fed into an AnalyserNode
+  // directly. Instead we capture the tab/system audio output and FFT that.
+  toggleLive=async()=>{
+    if(this.state.liveAudio){this.stopLive();return;}
+    if(!navigator.mediaDevices||!navigator.mediaDevices.getDisplayMedia){
+      this.setState({error:'This browser can\'t capture audio (getDisplayMedia unavailable).'});return;}
+    try{
+      const stream=await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});
+      const tracks=stream.getAudioTracks();
+      if(!tracks.length){stream.getTracks().forEach(t=>t.stop());
+        this.setState({error:'No audio in that share — pick a source and tick "Share tab/system audio".'});return;}
+      stream.getVideoTracks().forEach(t=>t.stop()); // audio only
+      const Ctx=window.AudioContext||window.webkitAudioContext;
+      const ctx=new Ctx();
+      if(ctx.state==='suspended')ctx.resume();
+      const an=ctx.createAnalyser();
+      an.fftSize=256; an.smoothingTimeConstant=.7;
+      ctx.createMediaStreamSource(new MediaStream(tracks)).connect(an);
+      this._audioCtx=ctx;this._analyser=an;this._freq=new Uint8Array(an.frequencyBinCount);
+      this._stream=stream;this._silentFrames=0;this._silentWarned=false;
+      tracks[0].addEventListener('ended',()=>this.stopLive());
+      this.setState({liveAudio:true,error:null});
+    }catch(e){
+      if(e&&e.name==='NotAllowedError')return; // user dismissed the picker
+      this.setState({error:'Live audio failed: '+(e.message||e)});
+    }
+  };
+  stopLive(){
+    try{if(this._stream)this._stream.getTracks().forEach(t=>t.stop());}catch(e){}
+    try{if(this._audioCtx)this._audioCtx.close();}catch(e){}
+    this._stream=null;this._analyser=null;this._audioCtx=null;this._freq=null;
+    this.setState({liveAudio:false});
+  }
   drawViz(t){const c=this.vizRef.current;if(!c)return;const w=c.clientWidth,h=c.clientHeight;if(!w||!h)return;
     const dpr=window.devicePixelRatio||1;
     if(c.width!==Math.round(w*dpr)||c.height!==Math.round(h*dpr)){c.width=Math.round(w*dpr);c.height=Math.round(h*dpr);}
     const x=c.getContext('2d');x.setTransform(dpr,0,0,dpr,0,0);x.clearRect(0,0,w,h);
     const ac=this.accent(),on=this.state.playing?1:.15,N=56;
     if(!this._sm)this._sm=new Array(N).fill(.15);
-    for(let i=0;i<N;i++){const f=i/N;
-      const tg=on*(.12+.88*Math.abs(Math.sin(t*(1.6+f*2.8)+i*1.73))*Math.pow(1-f*.85,.7)*(.45+.35*Math.sin(t*.9+i*.35)+.45*Math.abs(Math.sin(t*2.2+i))));
-      this._sm[i]+=(Math.min(1,Math.max(.03,tg))-this._sm[i])*.16;}
+    if(this._analyser&&this._freq){
+      // real spectrum from captured audio, mapped log-ish so bass doesn't swamp it
+      this._analyser.getByteFrequencyData(this._freq);
+      const bins=this._freq.length;let peak=0;
+      for(let i=0;i<N;i++){
+        const a=Math.min(bins-1,Math.floor(Math.pow(i/N,1.7)*bins*.8));
+        const b=Math.min(bins-1,Math.max(a+1,Math.floor(Math.pow((i+1)/N,1.7)*bins*.8)));
+        let mx=0;for(let k=a;k<=b;k++)if(this._freq[k]>mx)mx=this._freq[k];
+        if(mx>peak)peak=mx;
+        const tg=Math.min(1,Math.max(.03,(mx/255)*1.3));
+        this._sm[i]+=(tg-this._sm[i])*.34;
+      }
+      // if we're playing but hearing nothing, the share probably had no audio
+      if(this.state.playing){
+        if(peak<2){if(++this._silentFrames>240&&!this._silentWarned){this._silentWarned=true;
+          this.setState({error:'No audio detected. Re-share and choose "Entire Screen" + "Share system audio" (DRM can mute tab audio).'});}}
+        else{this._silentFrames=0;this._silentWarned=false;}
+      }
+    }else{
+      for(let i=0;i<N;i++){const f=i/N;
+        const tg=on*(.12+.88*Math.abs(Math.sin(t*(1.6+f*2.8)+i*1.73))*Math.pow(1-f*.85,.7)*(.45+.35*Math.sin(t*.9+i*.35)+.45*Math.abs(Math.sin(t*2.2+i))));
+        this._sm[i]+=(Math.min(1,Math.max(.03,tg))-this._sm[i])*.16;}
+    }
     const S=this._sm,m=this.vizMode();
     if(m==='bars'){const bw=w/N;for(let i=0;i<N;i++){const v=S[i],bh=Math.max(3,v*(h-16));x.fillStyle=this.hexA(ac,.2+.72*v);this.rr(x,i*bw+1.5,h-bh-4,bw-3,bh,2);}}
     else if(m==='wave'){for(let k=0;k<2;k++){x.beginPath();
@@ -492,7 +549,7 @@ class Dashboard extends React.Component {
       menuBd:s.menuOpen?this.hexA(ac,.55):'rgba(255,255,255,.16)',menuBg:s.menuOpen?this.hexA(ac,.14):'transparent',menuFg:s.menuOpen?ac:'rgba(255,255,255,.65)',
       menuItems:this.WDEF.map(def=>{const on=s.w[def.id].on;return{name:def.name,
         dot:on?ac:'rgba(255,255,255,.15)',fg:on?'#ffffff':'rgba(255,255,255,.45)',toggle:()=>this.setW(def.id,{on:!on})};}),
-      vizRef:this.vizRef,lyrRef:this.lyrRef,
+      vizRef:this.vizRef,lyrRef:this.lyrRef,liveAudio:s.liveAudio,toggleLive:this.toggleLive,
       lyrState:s.lyricsState,plainLyrics:s.lyricsPlain||[],
       lines:(s.lyricsState==='synced'&&s.lyrics)?s.lyrics.map((ln,i)=>({text:ln.text||'♪',
         go:()=>{const ms=ln.t*1000;this.setState({posMs:ms});if(this.player)this.player.seek(ms);},
@@ -630,6 +687,7 @@ class Dashboard extends React.Component {
               <span style={css("font:600 10px ui-monospace,Menlo,monospace;letter-spacing:.16em;color:rgba(255,255,255,.4)")}>VISUALIZER</span>
               <span style={css("margin-left:auto;display:flex;gap:5px")}>
                 {v.vizChips.map((c,i)=>(<button key={i} onClick={c.pick} style={css(`font:600 9px ui-monospace,Menlo,monospace;letter-spacing:.08em;padding:4px 9px;border-radius:20px;cursor:pointer;border:1px solid ${c.bd};background:${c.bg};color:${c.fg}`)}>{c.name}</button>))}
+                <button onClick={v.toggleLive} title={v.liveAudio?'Stop reacting to live audio':'React to real audio — share this tab (or your screen) WITH audio'} style={css(`font:600 9px ui-monospace,Menlo,monospace;letter-spacing:.08em;padding:4px 9px;border-radius:20px;cursor:pointer;border:1px solid ${v.liveAudio?this.hexA(v.accent,.55):'rgba(255,255,255,.14)'};background:${v.liveAudio?this.hexA(v.accent,.16):'transparent'};color:${v.liveAudio?v.accent:'rgba(255,255,255,.5)'}`)}>{v.liveAudio?'● LIVE':'LIVE'}</button>
               </span>
               <span style={css("display:flex;gap:2px;align-items:center")}>
                 {this.ic('viz',v.szClick,"Resize","⇲")}{this.ic('viz',v.fsClick,"Fullscreen","⤢")}{this.ic('viz',v.rmClick,"Remove","✕")}
