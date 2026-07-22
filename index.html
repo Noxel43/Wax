@@ -130,7 +130,13 @@ async function api(path,opts={}){
     body:opts.body?JSON.stringify(opts.body):undefined});
   if(r.status===401&&!opts._retry){try{await refreshTokens();}catch(e){}return api(path,Object.assign({},opts,{_retry:true}));}
   if(r.status===204||r.status===202) return null;
-  if(!r.ok) throw Object.assign(new Error('Spotify API '+r.status),{status:r.status});
+  if(!r.ok){
+    // Spotify explains the failure in the body — keep it, a bare status is useless.
+    let detail='';
+    try{const j=await r.json();detail=(j&&j.error&&j.error.message)||'';}catch(e){}
+    throw Object.assign(new Error('Spotify API '+r.status+(detail?': '+detail:'')),
+      {status:r.status,detail:detail});
+  }
   const ct=r.headers.get('content-type')||'';
   return ct.indexOf('json')>=0?r.json():null;
 }
@@ -351,7 +357,7 @@ class Dashboard extends React.Component {
       const items=(r&&r[type+'s']&&r[type+'s'].items)||[];
       this.setState({results:items.filter(Boolean).map(it=>this.mapResult(it,type)),searching:false});
     }catch(e){if(this._searchReq===tag)
-      this.setState({searching:false,error:'Search failed ('+(e.status||e.message)+')'});}
+      this.setState({searching:false,error:'Search failed: '+(e.detail||e.message)});}
   }
   mapResult(it,type){
     const imgs=(it.album&&it.album.images)||it.images||[];
@@ -441,18 +447,18 @@ class Dashboard extends React.Component {
   likeT=async()=>{const id=this.state.track&&this.state.track.id;if(!id)return;const nl=!this.state.liked;this.setState({liked:nl});
     try{await api('/me/tracks',{method:nl?'PUT':'DELETE',body:{ids:[id]}});}
     catch(e){if(this.state.track&&this.state.track.id===id)this.setState({liked:!nl});
-      this.setState({error:'Could not '+(nl?'save':'remove')+' this track ('+(e.status||e.message)+')'});}};
+      this.setState({error:'Could not '+(nl?'save':'remove')+' this track: '+(e.detail||e.message)});}};
   eqPick(name,vals){this.setState({eq:vals.slice(),eqPreset:name},()=>this.save());}
   eqReset=()=>this.setState({eq:DEFAULT_EQ.slice(),eqPreset:'Default'},()=>this.save());
   eqDown(i,e){this.barDrag(e,(fx,fy)=>this.setState(st=>{const eq=st.eq.slice();eq[i]=fy;return{eq};}));
     const up=()=>{window.removeEventListener('pointerup',up);this.setState({eqPreset:'Custom'},()=>this.save());};
     window.addEventListener('pointerup',up);}
   play(body){const q=this.deviceId?('?device_id='+this.deviceId):'';
-    return api('/me/player/play'+q,{method:'PUT',body}).catch(e=>this.setState({error:'Playback failed ('+(e.status||e.message)+')'}));}
+    return api('/me/player/play'+q,{method:'PUT',body}).catch(e=>this.setState({error:'Playback failed: '+(e.detail||e.message)}));}
   playContext(uri,pi){this.setState({activePl:pi==null?this.state.activePl:pi});this.play({context_uri:uri});}
   playUris(uris){this.play({uris});}
   addQueue(uri){const q=this.deviceId?('&device_id='+this.deviceId):'';
-    api('/me/player/queue?uri='+encodeURIComponent(uri)+q,{method:'POST'}).then(()=>setTimeout(()=>this.refreshQueue(),400)).catch(e=>this.setState({error:'Could not queue ('+(e.status||e.message)+')'}));}
+    api('/me/player/queue?uri='+encodeURIComponent(uri)+q,{method:'POST'}).then(()=>setTimeout(()=>this.refreshQueue(),400)).catch(e=>this.setState({error:'Could not queue: '+(e.detail||e.message)}));}
   transfer(id,play){api('/me/player',{method:'PUT',body:{device_ids:[id],play:!!play}}).then(()=>setTimeout(()=>this.refreshDevices(),400)).catch(()=>{});}
 
   // --- widget chrome / layout ----------------------------------------------
