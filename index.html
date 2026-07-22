@@ -175,6 +175,10 @@ function parseLrc(lrc){
 const VIZ_BASS_CUT = .8;     // ceiling for the lowest bars (0.8 = 80%)
 const VIZ_TILT = 2.0;        // extra sensitivity applied toward the high end
 const VIZ_TILT_CURVE = 1.15; // how quickly that boost ramps in
+// Fraction of the FFT spectrum the bars span. Streaming codecs roll off above
+// ~16kHz, so mapping bars up to Nyquist just leaves the top few permanently at
+// zero. 0.66 of 24kHz ≈ 15.8kHz, which keeps every bar carrying signal.
+const VIZ_TOP = .66;
 const DEFAULT_EQ=[.5,.62,.55,.42,.5];
 const EQ_PRESETS=[
   ['Flat',[.5,.5,.5,.5,.5]],
@@ -487,8 +491,8 @@ class Dashboard extends React.Component {
       for(let i=0;i<N;i++){
         const f=i/N;
         // start at bin 1 — bin 0 is DC offset and inflates the bass
-        const a=Math.max(1,Math.min(bins-1,Math.floor(Math.pow(f,1.7)*bins*.8)));
-        const b=Math.min(bins-1,Math.max(a+1,Math.floor(Math.pow((i+1)/N,1.7)*bins*.8)));
+        const a=Math.max(1,Math.min(bins-1,Math.floor(Math.pow(f,1.7)*bins*VIZ_TOP)));
+        const b=Math.min(bins-1,Math.max(a+1,Math.floor(Math.pow((i+1)/N,1.7)*bins*VIZ_TOP)));
         let mx=0;for(let k=a;k<=b;k++)if(this._freq[k]>mx)mx=this._freq[k];
         if(mx>peak)peak=mx;
         const gain=VIZ_BASS_CUT+VIZ_TILT*Math.pow(f,VIZ_TILT_CURVE);
