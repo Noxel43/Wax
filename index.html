@@ -623,7 +623,10 @@ class Dashboard extends React.Component {
 
         {/* header bar */}
         <div style={{...css("display:flex;align-items:center;gap:10px;margin:2px 6px;transition:max-height .35s,opacity .35s,margin .35s"),...css(v.barSt)}}>
-          <span style={css(`font-family:'Archivo Black',sans-serif;font-size:26px;line-height:1;letter-spacing:.02em;text-transform:uppercase;background:${v.logoGrad};-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent`)}>Wax</span>
+          {/* background-image, not the `background` shorthand: the shorthand resets
+              background-clip, and React only rewrites changed properties — so a new
+              gradient would wipe the text clip and paint a solid block. */}
+          <span style={css(`font-family:'Archivo Black',sans-serif;font-size:26px;line-height:1;letter-spacing:.02em;text-transform:uppercase;background-image:${v.logoGrad};-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent`)}>Wax</span>
           <span style={css("font:500 10px ui-monospace,Menlo,monospace;letter-spacing:.16em;color:rgba(255,255,255,.4)")}>SESSION DASHBOARD</span>
           <span style={css("margin-left:auto;font:500 10px ui-monospace,Menlo,monospace;letter-spacing:.1em;color:rgba(255,255,255,.3)")}>DRAG HEADERS TO REARRANGE</span>
           <button onClick={logout} title="Sign out of Spotify" className="hw" style={css("font:600 10px ui-monospace,Menlo,monospace;letter-spacing:.12em;padding:6px 12px;border-radius:16px;cursor:pointer;border:1px solid rgba(255,255,255,.16);background:transparent;color:rgba(255,255,255,.5)")}>SIGN OUT</button>
@@ -915,7 +918,7 @@ function Connect({error}){
   return (
     <div style={box}>
       <div style={card}>
-        <div style={css("font-family:'Archivo Black',sans-serif;font-size:40px;text-transform:uppercase;letter-spacing:.02em;background:linear-gradient(135deg,#4fd8c0 10%,#fff 60%,rgba(79,216,192,.55));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent")}>Wax</div>
+        <div style={css("font-family:'Archivo Black',sans-serif;font-size:40px;text-transform:uppercase;letter-spacing:.02em;background-image:linear-gradient(135deg,#4fd8c0 10%,#fff 60%,rgba(79,216,192,.55));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent")}>Wax</div>
         <div style={css("font:600 10px ui-monospace,Menlo,monospace;letter-spacing:.16em;color:rgba(255,255,255,.4);margin-top:4px")}>SESSION DASHBOARD · SPOTIFY</div>
         <p style={css("font-size:13.5px;line-height:1.6;color:rgba(255,255,255,.6);margin:22px 0 20px")}>Connect your Spotify Premium account to control playback, browse your playlists, and drive the dashboard with live data. Audio plays right in this tab.</p>
         {error&&<div style={css("font-size:12px;color:#ff9d9d;background:rgba(240,90,90,.12);border:1px solid rgba(240,90,90,.3);border-radius:10px;padding:9px 12px;margin-bottom:16px")}>{error}</div>}
