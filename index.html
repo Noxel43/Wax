@@ -124,16 +124,25 @@ function logout(){localStorage.removeItem(TOKEN_KEY);location.href=REDIRECT_URI;
 async function api(path,opts={}){
   const token=await validToken();
   if(!token) throw Object.assign(new Error('Not authenticated'),{status:401});
-  const r=await fetch('https://api.spotify.com/v1'+path,{
-    method:opts.method||'GET',
-    headers:Object.assign({Authorization:'Bearer '+token},opts.body?{'Content-Type':'application/json'}:{}),
-    body:opts.body?JSON.stringify(opts.body):undefined});
+  let r;
+  try{
+    r=await fetch('https://api.spotify.com/v1'+path,{
+      method:opts.method||'GET',
+      headers:Object.assign({Authorization:'Bearer '+token},opts.body?{'Content-Type':'application/json'}:{}),
+      body:opts.body?JSON.stringify(opts.body):undefined});
+  }catch(netErr){
+    // fetch() rejects before any response: offline, DNS, VPN, or a blocker
+    console.warn('[wax] network error calling',path,netErr);
+    throw Object.assign(new Error('Network error reaching Spotify'),
+      {status:0,detail:"couldn't reach Spotify (offline, VPN, or a browser blocker?)"});
+  }
   if(r.status===401&&!opts._retry){try{await refreshTokens();}catch(e){}return api(path,Object.assign({},opts,{_retry:true}));}
   if(r.status===204||r.status===202) return null;
   if(!r.ok){
     // Spotify explains the failure in the body — keep it, a bare status is useless.
     let detail='';
     try{const j=await r.json();detail=(j&&j.error&&j.error.message)||'';}catch(e){}
+    console.warn('[wax] Spotify '+r.status+' '+(opts.method||'GET')+' '+path+(detail?' — '+detail:''));
     throw Object.assign(new Error('Spotify API '+r.status+(detail?': '+detail:'')),
       {status:r.status,detail:detail});
   }
@@ -352,7 +361,8 @@ class Dashboard extends React.Component {
     const type=this.state.searchType,tag=q+'|'+type;this._searchReq=tag;
     this.setState({searching:true});
     try{
-      const r=await api('/search?'+new URLSearchParams({q:q,type:type,limit:'20'}).toString());
+      // no `limit` — Spotify already defaults to 20 and rejects the param here
+      const r=await api('/search?'+new URLSearchParams({q:q,type:type}).toString());
       if(this._searchReq!==tag)return;
       const items=(r&&r[type+'s']&&r[type+'s'].items)||[];
       this.setState({results:items.filter(Boolean).map(it=>this.mapResult(it,type)),searching:false});
