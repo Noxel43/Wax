@@ -170,9 +170,9 @@ function parseLrc(lrc){
 // Visualizer response curve for live audio. Music puts most of its energy in the
 // low end, so the bass bars would otherwise sit pinned at full height. Total gain
 // per bar = VIZ_BASS_CUT + VIZ_TILT * (bar position ^ VIZ_TILT_CURVE), i.e. the
-// lowest bars top out at 60% of their true level while the quiet highs get up to
-// ~2.6x. Tweak these three to taste.
-const VIZ_BASS_CUT = .6;     // ceiling for the lowest bars (0.6 = 60%)
+// lowest bars top out at 80% of their true level while the quiet highs get up to
+// ~2.8x. Tweak these three to taste.
+const VIZ_BASS_CUT = .8;     // ceiling for the lowest bars (0.8 = 80%)
 const VIZ_TILT = 2.0;        // extra sensitivity applied toward the high end
 const VIZ_TILT_CURVE = 1.15; // how quickly that boost ramps in
 const DEFAULT_EQ=[.5,.62,.55,.42,.5];
