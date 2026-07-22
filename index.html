@@ -15,6 +15,15 @@
   button{font-family:'Space Grotesk',system-ui,sans-serif}
   @keyframes dropIn{from{opacity:0;transform:translateY(-6px) scale(.97)}to{opacity:1;transform:translateY(0) scale(1)}}
   @keyframes spin{to{transform:rotate(360deg)}}
+  /* Canvas-style ambient motion for the Now Playing backdrop */
+  @keyframes drift{
+    from{transform:scale(1.35) translate3d(-2.5%,-1.5%,0)}
+    to{transform:scale(1.52) translate3d(2.5%,2%,0)}
+  }
+  @keyframes artFloat{
+    from{transform:scale(1) translateY(0)}
+    to{transform:scale(1.035) translateY(-5px)}
+  }
   .hw:hover{color:#fff !important}
   .hs:hover{transform:scale(1.07) !important}
   .hb5:hover{background:rgba(255,255,255,.05) !important}
@@ -525,7 +534,7 @@ class Dashboard extends React.Component {
     <span style={css("font:600 10px ui-monospace,Menlo,monospace;letter-spacing:.16em;color:rgba(255,255,255,.4)")}>{label}</span>
     {this.ctrls(v,wid,sz)}</div>;}
   card(v,wid,lay,children){return <div data-wid={wid} onDragOver={v.dragOver} onDragLeave={v.dragLeave} onDrop={v.drop}
-    style={css("background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.08);border-radius:18px;overflow:hidden;display:flex;flex-direction:column;"+lay)}>{children}</div>;}
+    style={css("position:relative;background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.08);border-radius:18px;overflow:hidden;display:flex;flex-direction:column;"+lay)}>{children}</div>;}
 
   render(){
     const v=this.renderVals();
@@ -578,9 +587,16 @@ class Dashboard extends React.Component {
 
           {/* NOW PLAYING */}
           {this.card(v,'now',v.layNow,<>
+            {/* Canvas-style ambient backdrop: blurred album art, slowly drifting.
+                Motion pauses with playback. Scrim keeps the text readable. */}
+            {v.artUrl&&<>
+              <div style={css(`position:absolute;inset:0;z-index:0;background-image:url('${v.artUrl}');background-size:cover;background-position:center;filter:blur(40px) saturate(1.6);opacity:.45;will-change:transform;animation:drift 26s ease-in-out infinite alternate;animation-play-state:${v.playing?'running':'paused'}`)}></div>
+              <div style={css(`position:absolute;inset:0;z-index:0;background:radial-gradient(120% 100% at 12% 50%, ${this.hexA(v.accent,.2)}, rgba(0,0,0,0) 62%), linear-gradient(100deg, rgba(11,12,14,.93) 0%, rgba(11,12,14,.78) 48%, rgba(11,12,14,.62) 100%)`)}></div>
+            </>}
+            <div style={css("position:relative;z-index:1;flex:1;display:flex;flex-direction:column;min-height:0")}>
             {this.head(v,'now','NOW PLAYING','10px 14px 0',false)}
             <div style={css("flex:1;display:flex;gap:18px;padding:10px 20px 18px;min-height:0;align-items:center")}>
-              <div style={css(`width:clamp(96px,34%,176px);flex:none;aspect-ratio:1;border-radius:14px;${artCss(v.artUrl)};box-shadow:0 14px 44px rgba(0,0,0,.5)`)}></div>
+              <div style={css(`width:clamp(96px,34%,176px);flex:none;aspect-ratio:1;border-radius:14px;${artCss(v.artUrl)};box-shadow:0 14px 44px rgba(0,0,0,.5);will-change:transform;animation:artFloat 14s ease-in-out infinite alternate;animation-play-state:${v.playing?'running':'paused'}`)}></div>
               <div style={css("flex:1;min-width:0;display:flex;flex-direction:column;gap:4px")}>
                 <div style={css("font-size:28px;font-weight:700;line-height:1.12;letter-spacing:-.015em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{v.title}</div>
                 <div style={css("font-size:14px;color:rgba(255,255,255,.58);white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{v.artist}{v.album?" · "+v.album:''}</div>
@@ -604,6 +620,7 @@ class Dashboard extends React.Component {
                   <span>{v.cur}</span><span>{v.durS}</span>
                 </div>
               </div>
+            </div>
             </div>
           </>)}
 
